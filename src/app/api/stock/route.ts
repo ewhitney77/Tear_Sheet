@@ -5,6 +5,108 @@ const SEGMENT_COLORS = [
   "#829ab1", "#9fb3c8", "#bcccdc", "#d9e2ec", "#f0f4f8",
 ];
 
+// ---- Yahoo Finance cookie/crumb auth ----
+let cachedCrumb: string | null = null;
+let cachedCookie: string | null = null;
+let crumbExpiry = 0;
+
+async function getYahooCrumb(): Promise<{ crumb: string; cookie: string }> {
+  if (cachedCrumb && cachedCookie && Date.now() < crumbExpiry) {
+    return { crumb: cachedCrumb, cookie: cachedCookie };
+  }
+
+  // Step 1: Get consent/session cookie from Yahoo
+  const initRes = await fetch("https://fc.yahoo.com", {
+    redirect: "manual",
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    },
+  });
+
+  // Collect set-cookie headers
+  const cookies: string[] = [];
+  initRes.headers.forEach((value, key) => {
+    if (key.toLowerCase() === "set-cookie") {
+      const cookiePart = value.split(";")[0];
+      cookies.push(cookiePart);
+    }
+  });
+
+  const cookieString = cookies.join("; ");
+
+  // Step 2: Use cookie to get crumb
+  const crumbRes = await fetch(
+    "https://query2.finance.yahoo.com/v1/test/getcrumb",
+    {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Cookie: cookieString,
+      },
+    }
+  );
+
+  if (!crumbRes.ok) {
+    throw new Error(`Failed to get Yahoo crumb: HTTP ${crumbRes.status}`);
+  }
+
+  const crumb = await crumbRes.text();
+
+  cachedCrumb = crumb;
+  cachedCookie = cookieString;
+  crumbExpiry = Date.now() + 10 * 60 * 1000; // Cache for 10 minutes
+
+  return { crumb, cookie: cookieString };
+}
+
+async function yahooFetch(url: string, cookie: string): Promise<Response> {
+  return fetch(url, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      Cookie: cookie,
+      Accept: "application/json",
+    },
+  });
+}
+
+async function fetchWithAuth(url: string): Promise<unknown> {
+  const { crumb, cookie } = await getYahooCrumb();
+  const separator = url.includes("?") ? "&" : "?";
+  const fullUrl = `${url}${separator}crumb=${encodeURIComponent(crumb)}`;
+
+  const res = await yahooFetch(fullUrl, cookie);
+  if (!res.ok) {
+    // If 401/403, invalidate cache and retry once
+    if (res.status === 401 || res.status === 403) {
+      cachedCrumb = null;
+      cachedCookie = null;
+      crumbExpiry = 0;
+      const retry = await getYahooCrumb();
+      const retryUrl = `${url}${separator}crumb=${encodeURIComponent(retry.crumb)}`;
+      const retryRes = await yahooFetch(retryUrl, retry.cookie);
+      if (!retryRes.ok) throw new Error(`Yahoo HTTP ${retryRes.status} for ${url}`);
+      return retryRes.json();
+    }
+    throw new Error(`Yahoo HTTP ${res.status} for ${url}`);
+  }
+  return res.json();
+}
+
+// Chart endpoint does NOT require crumb
+async function fetchChart(url: string): Promise<unknown> {
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    },
+  });
+  if (!res.ok) throw new Error(`Chart HTTP ${res.status}`);
+  return res.json();
+}
+
+// ---- Helpers ----
 function formatMarketCap(cap: number): string {
   if (cap >= 1e12) return `$${(cap / 1e12).toFixed(1)} Tril.`;
   if (cap >= 1e9) return `$${(cap / 1e9).toFixed(1)} Bil.`;
@@ -26,17 +128,7 @@ function getAnalystRating(score: number): string {
   return "Strong Sell";
 }
 
-async function fetchJSON(url: string) {
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    },
-    next: { revalidate: 300 },
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-  return res.json();
-}
-
+// ---- Main handler ----
 export async function GET(request: NextRequest) {
   const ticker = request.nextUrl.searchParams.get("ticker")?.toUpperCase();
   if (!ticker) {
@@ -44,167 +136,190 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    // Fetch data from Yahoo Finance v8 API endpoints in parallel
-    const [quoteSummary, chartData, chartDataLong] = await Promise.all([
-      fetchJSON(
-        `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=assetProfile,defaultKeyStatistics,financialData,earningsTrend,earnings,incomeStatementHistory,incomeStatementHistoryQuarterly,summaryDetail,price,recommendationTrend,industryTrend`
-      ).catch(() => null),
-      fetchJSON(
+    // Fetch all data in parallel
+    // quoteSummary requires crumb auth; chart endpoints may not
+    const [quoteSummary, chartData, chartDataLong] = await Promise.allSettled([
+      fetchWithAuth(
+        `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=assetProfile,defaultKeyStatistics,financialData,earningsTrend,earnings,incomeStatementHistory,incomeStatementHistoryQuarterly,summaryDetail,price,recommendationTrend`
+      ),
+      fetchChart(
         `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=5y&interval=1wk`
-      ).catch(() => null),
-      fetchJSON(
+      ),
+      fetchChart(
         `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=10y&interval=1mo`
-      ).catch(() => null),
+      ),
     ]);
 
-    if (!quoteSummary?.quoteSummary?.result?.[0]) {
+    // Extract results
+    const summary = quoteSummary.status === "fulfilled" ? (quoteSummary.value as Record<string, unknown>) : null;
+    const chart5y = chartData.status === "fulfilled" ? (chartData.value as Record<string, unknown>) : null;
+    const chart10y = chartDataLong.status === "fulfilled" ? (chartDataLong.value as Record<string, unknown>) : null;
+
+    // We need at least quoteSummary OR chart data to proceed
+    const modules = (summary as { quoteSummary?: { result?: Record<string, unknown>[] } })
+      ?.quoteSummary?.result?.[0];
+
+    if (!modules && !chart5y) {
       return NextResponse.json(
-        { error: `Could not find data for ticker: ${ticker}` },
+        { error: `Could not find data for ticker: ${ticker}. Please check the symbol and try again.` },
         { status: 404 }
       );
     }
 
-    const modules = quoteSummary.quoteSummary.result[0];
-    const profile = modules.assetProfile || {};
-    const keyStats = modules.defaultKeyStatistics || {};
-    const financial = modules.financialData || {};
-    const summaryDetail = modules.summaryDetail || {};
-    const priceData = modules.price || {};
-    const earnings = modules.earnings || {};
-    const earningsTrend = modules.earningsTrend || {};
-    const recommendationTrend = modules.recommendationTrend || {};
-    const incomeHistory = modules.incomeStatementHistory?.incomeStatementHistory || [];
+    // Safely extract all modules (may be empty if quoteSummary failed)
+    const profile = (modules?.assetProfile || {}) as Record<string, unknown>;
+    const keyStats = (modules?.defaultKeyStatistics || {}) as Record<string, unknown>;
+    const financial = (modules?.financialData || {}) as Record<string, unknown>;
+    const summaryDetail = (modules?.summaryDetail || {}) as Record<string, unknown>;
+    const priceData = (modules?.price || {}) as Record<string, unknown>;
+    const earnings = (modules?.earnings || {}) as Record<string, unknown>;
+    const earningsTrend = (modules?.earningsTrend || {}) as Record<string, unknown>;
+    const recommendationTrend = (modules?.recommendationTrend || {}) as Record<string, unknown>;
+    const incomeStatements = (modules?.incomeStatementHistory as Record<string, unknown>) || {};
+    const incomeHistory = (incomeStatements?.incomeStatementHistory || []) as Record<string, unknown>[];
 
-    // Process price history from chart data
+    // ---- Process price history ----
     const priceHistory: Array<{ date: string; close: number; volume: number }> = [];
-    if (chartData?.chart?.result?.[0]) {
-      const result = chartData.chart.result[0];
-      const timestamps = result.timestamp || [];
-      const closes = result.indicators?.quote?.[0]?.close || [];
-      const volumes = result.indicators?.quote?.[0]?.volume || [];
+    const chartResult5y = (chart5y as { chart?: { result?: Record<string, unknown>[] } })?.chart?.result?.[0];
+    if (chartResult5y) {
+      const timestamps = (chartResult5y.timestamp || []) as number[];
+      const quote = ((chartResult5y.indicators as Record<string, unknown>)?.quote as Record<string, unknown>[])?.[0] || {};
+      const closes = (quote.close || []) as (number | null)[];
+      const volumes = (quote.volume || []) as (number | null)[];
 
       for (let i = 0; i < timestamps.length; i++) {
         if (closes[i] != null) {
           priceHistory.push({
             date: new Date(timestamps[i] * 1000).toISOString().split("T")[0],
-            close: Math.round(closes[i] * 100) / 100,
+            close: Math.round(closes[i]! * 100) / 100,
             volume: volumes[i] || 0,
           });
         }
       }
     }
 
-    // Process EPS estimates from earningsTrend
+    // ---- EPS ----
     const epsEstimates: Array<{ period: string; actual: number | null; estimate: number | null }> = [];
-    const earningsHistory = earnings.earningsChart?.quarterly || [];
-    for (const q of earningsHistory) {
+    const earningsChart = (earnings as { earningsChart?: { quarterly?: Record<string, unknown>[] } })
+      ?.earningsChart?.quarterly || [];
+    for (const q of earningsChart) {
       epsEstimates.push({
-        period: q.date || "",
-        actual: q.actual?.raw ?? null,
-        estimate: q.estimate?.raw ?? null,
+        period: (q.date as string) || "",
+        actual: (q.actual as { raw?: number })?.raw ?? null,
+        estimate: (q.estimate as { raw?: number })?.raw ?? null,
       });
     }
-    // Add future estimates from earningsTrend
-    const trends = earningsTrend.trend || [];
+    const trends = ((earningsTrend as { trend?: Record<string, unknown>[] }).trend || []);
     for (const t of trends) {
-      if (t.period && t.earningsEstimate?.avg?.raw != null) {
+      const est = (t.earningsEstimate as { avg?: { raw?: number } })?.avg?.raw;
+      if (t.period && est != null) {
         epsEstimates.push({
-          period: t.period,
+          period: t.period as string,
           actual: null,
-          estimate: t.earningsEstimate.avg.raw,
+          estimate: est,
         });
       }
     }
 
-    // Process P/E history from long-term chart data
+    // ---- P/E History ----
     const peHistory: Array<{ date: string; pe: number }> = [];
-    if (chartDataLong?.chart?.result?.[0]) {
-      const result = chartDataLong.chart.result[0];
-      const timestamps = result.timestamp || [];
-      const closes = result.indicators?.quote?.[0]?.close || [];
-      const currentEps = keyStats.trailingEps?.raw || financial.earningsPerShare?.raw || 1;
+    const chartResult10y = (chart10y as { chart?: { result?: Record<string, unknown>[] } })?.chart?.result?.[0];
+    if (chartResult10y) {
+      const timestamps = (chartResult10y.timestamp || []) as number[];
+      const quote = ((chartResult10y.indicators as Record<string, unknown>)?.quote as Record<string, unknown>[])?.[0] || {};
+      const closes = (quote.close || []) as (number | null)[];
+      const trailingEps = (keyStats.trailingEps as { raw?: number })?.raw || 0;
 
-      // Approximate P/E using trailing EPS scaled by price change
-      const currentPrice = priceData.regularMarketPrice?.raw || closes[closes.length - 1] || 1;
-      for (let i = 0; i < timestamps.length; i += 3) {
-        if (closes[i] != null) {
-          const ratio = closes[i] / currentPrice;
-          const approxPE = (currentEps > 0) ? (closes[i] / (currentEps * ratio + currentEps * (1 - ratio))) : 0;
-          if (approxPE > 0 && approxPE < 200) {
-            peHistory.push({
-              date: new Date(timestamps[i] * 1000).toISOString().split("T")[0],
-              pe: Math.round(approxPE * 10) / 10,
-            });
+      if (trailingEps > 0) {
+        const currentPrice = (priceData.regularMarketPrice as { raw?: number })?.raw || closes[closes.length - 1] || 1;
+        for (let i = 0; i < timestamps.length; i += 3) {
+          if (closes[i] != null) {
+            const pe = closes[i]! / trailingEps;
+            if (pe > 0 && pe < 200) {
+              peHistory.push({
+                date: new Date(timestamps[i] * 1000).toISOString().split("T")[0],
+                pe: Math.round(pe * 10) / 10,
+              });
+            }
           }
         }
       }
     }
 
-    // Process revenue history from income statements
+    // ---- Revenue History ----
     const revenueHistory: Array<{ year: string; revenue: number; growth: number | null }> = [];
     const sortedIncome = [...incomeHistory].reverse();
     for (let i = 0; i < sortedIncome.length; i++) {
       const stmt = sortedIncome[i];
-      const rev = stmt.totalRevenue?.raw || 0;
-      const prevRev = i > 0 ? (sortedIncome[i - 1].totalRevenue?.raw || 0) : 0;
+      const rev = (stmt.totalRevenue as { raw?: number })?.raw || 0;
+      const prevRev = i > 0 ? ((sortedIncome[i - 1].totalRevenue as { raw?: number })?.raw || 0) : 0;
+      const endDate = (stmt.endDate as { raw?: number })?.raw || (Date.now() / 1000);
       revenueHistory.push({
-        year: new Date(stmt.endDate?.raw * 1000 || Date.now()).getFullYear().toString(),
+        year: new Date(endDate * 1000).getFullYear().toString(),
         revenue: rev,
         growth: i > 0 && prevRev > 0 ? Math.round(((rev - prevRev) / prevRev) * 1000) / 10 : null,
       });
     }
 
-    // Build revenue segments (approximate from available data)
-    // Yahoo doesn't provide segment breakdowns directly, so we create representative segments
-    const sector = profile.sector || "Unknown";
-    const industry = profile.industry || "Unknown";
+    // ---- Company info ----
+    const sector = (profile.sector as string) || "Unknown";
+    const industry = (profile.industry as string) || "Unknown";
+    const companyName = (priceData.shortName as string) || (priceData.longName as string) || ticker;
+    const description = (profile.longBusinessSummary as string) ||
+      `${companyName} operates in the ${industry} industry within the ${sector} sector.`;
+    const country = (profile.country as string) || "United States";
 
-    // Get recommendation data
-    const recTrend = recommendationTrend.trend?.[0] || {};
-    const totalRec = (recTrend.strongBuy || 0) + (recTrend.buy || 0) + (recTrend.hold || 0) + (recTrend.sell || 0) + (recTrend.strongSell || 0);
-    const weightedScore = totalRec > 0
-      ? ((recTrend.strongBuy || 0) * 5 + (recTrend.buy || 0) * 4 + (recTrend.hold || 0) * 3 + (recTrend.sell || 0) * 2 + (recTrend.strongSell || 0) * 1) / totalRec
-      : 3;
+    // Analyst rating
+    const recTrend = ((recommendationTrend as { trend?: Record<string, unknown>[] }).trend || [])[0] || {};
+    const sb = (recTrend.strongBuy as number) || 0;
+    const b = (recTrend.buy as number) || 0;
+    const h = (recTrend.hold as number) || 0;
+    const s = (recTrend.sell as number) || 0;
+    const ss = (recTrend.strongSell as number) || 0;
+    const totalRec = sb + b + h + s + ss;
+    const weightedScore = totalRec > 0 ? (sb * 5 + b * 4 + h * 3 + s * 2 + ss * 1) / totalRec : 3;
 
-    // Build description
-    const companyName = priceData.shortName || priceData.longName || ticker;
-    const description = profile.longBusinessSummary || `${companyName} operates in the ${industry} industry within the ${sector} sector.`;
+    const divYield = (summaryDetail.dividendYield as { raw?: number })?.raw || 0;
+    const fiveYearAvgDivYield = (summaryDetail.fiveYearAvgDividendYield as { raw?: number })?.raw || 0;
+    const divGrowthEst = fiveYearAvgDivYield > 0
+      ? Math.round(((divYield - fiveYearAvgDivYield / 100) / (fiveYearAvgDivYield / 100)) * 100) / 100
+      : 0;
+    const forwardPE = (keyStats.forwardPE as { raw?: number })?.raw || (summaryDetail.forwardPE as { raw?: number })?.raw || 0;
+    const beta = (keyStats.beta as { raw?: number })?.raw || 1;
+    const revenueGrowth = (financial as { revenueGrowth?: { raw?: number } }).revenueGrowth?.raw || 0;
+    const profitMargin = (financial as { profitMargins?: { raw?: number } }).profitMargins?.raw || 0;
+    const returnOnEquity = (financial as { returnOnEquity?: { raw?: number } }).returnOnEquity?.raw || 0;
+    const freeCashflow = (financial as { freeCashflow?: { raw?: number } }).freeCashflow?.raw || 0;
+    const totalRevenue = (financial as { totalRevenue?: { raw?: number } }).totalRevenue?.raw || 0;
+    const debtToEquity = (financial as { debtToEquity?: { raw?: number } }).debtToEquity?.raw || 0;
+    const currentRatio = (financial as { currentRatio?: { raw?: number } }).currentRatio?.raw || 0;
 
-    // Dividend growth estimate (approximate from historical data)
-    const divYield = summaryDetail.dividendYield?.raw || 0;
-    const fiveYearAvgDivYield = summaryDetail.fiveYearAvgDividendYield?.raw || 0;
-    const divGrowthEst = fiveYearAvgDivYield > 0 ? Math.round(((divYield - fiveYearAvgDivYield / 100) / (fiveYearAvgDivYield / 100)) * 100) / 100 : 0;
+    // ---- Thesis ----
+    const thesis = buildThesis(companyName, revenueGrowth, profitMargin, returnOnEquity, freeCashflow, totalRevenue, divYield, sector, industry);
+    const risks = buildRisks(companyName, debtToEquity, currentRatio, beta, sector, industry);
 
-    // Forward P/E and trailing P/E
-    const forwardPE = keyStats.forwardPE?.raw || summaryDetail.forwardPE?.raw || 0;
-    const beta = keyStats.beta?.raw || 1;
-
-    // Build thesis and risks from available data
-    const thesis = buildThesis(companyName, financial, keyStats, summaryDetail, sector, industry, divYield);
-    const risks = buildRisks(companyName, financial, keyStats, sector, industry, beta);
-
-    // Revenue by geography - use country from profile
-    const country = profile.country || "United States";
+    // ---- Segments ----
     const revenueByGeography = [
       { name: country, value: 60, color: SEGMENT_COLORS[0] },
       { name: "Europe", value: 20, color: SEGMENT_COLORS[2] },
       { name: "Asia Pacific", value: 12, color: SEGMENT_COLORS[4] },
       { name: "Other", value: 8, color: SEGMENT_COLORS[6] },
     ];
-
-    // Revenue by segment (simplified)
     const revenueBySegment = [
       { name: industry || "Core Business", value: 70, color: SEGMENT_COLORS[0] },
       { name: "Services", value: 18, color: SEGMENT_COLORS[2] },
       { name: "Other", value: 12, color: SEGMENT_COLORS[4] },
     ];
 
-    const currentPrice = priceData.regularMarketPrice?.raw || 0;
-    const previousClose = priceData.regularMarketPreviousClose?.raw || summaryDetail.previousClose?.raw || 0;
+    // ---- Price info ----
+    const currentPrice = (priceData.regularMarketPrice as { raw?: number })?.raw || 0;
+    const previousClose = (priceData.regularMarketPreviousClose as { raw?: number })?.raw
+      || (summaryDetail.previousClose as { raw?: number })?.raw || 0;
     const priceChange = currentPrice - previousClose;
     const priceChangePercent = previousClose > 0 ? (priceChange / previousClose) * 100 : 0;
+    const marketCap = (priceData.marketCap as { raw?: number })?.raw || 0;
 
-    // Build citations
+    // ---- Citations ----
     const today = new Date().toISOString().split("T")[0];
     const citations = [
       { source: "Yahoo Finance", url: `https://finance.yahoo.com/quote/${ticker}`, description: `${companyName} stock quote, financials, and market data`, accessDate: today },
@@ -220,13 +335,13 @@ export async function GET(request: NextRequest) {
     const stockData = {
       companyName,
       ticker,
-      marketCap: priceData.marketCap?.raw || 0,
-      marketCapFormatted: formatMarketCap(priceData.marketCap?.raw || 0),
+      marketCap,
+      marketCapFormatted: formatMarketCap(marketCap),
       sector,
       industry,
       dividendYield: Math.round(divYield * 10000) / 100,
       dividendGrowthEst: Math.abs(divGrowthEst) > 50 ? 5.0 : Math.round(divGrowthEst * 10) / 10,
-      shortInterestRatio: keyStats.shortRatio?.raw || 0,
+      shortInterestRatio: (keyStats.shortRatio as { raw?: number })?.raw || 0,
       analystRating: getAnalystRating(weightedScore),
       riskRating: getRiskRating(beta),
       appropriatenessRating: beta < 1.5 ? "All" : "Moderate/Aggressive",
@@ -258,29 +373,21 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(stockData);
   } catch (error) {
     console.error("Stock API error:", error);
+    const message = error instanceof Error ? error.message : "Unknown error";
     return NextResponse.json(
-      { error: `Failed to fetch data for ${ticker}. Please try again.` },
+      { error: `Failed to fetch data for ${ticker}: ${message}` },
       { status: 500 }
     );
   }
 }
 
+// ---- Thesis builder ----
 function buildThesis(
-  name: string,
-  financial: Record<string, unknown>,
-  keyStats: Record<string, unknown>,
-  summaryDetail: Record<string, unknown>,
-  sector: string,
-  industry: string,
-  divYield: number
+  name: string, revenueGrowth: number, profitMargin: number,
+  returnOnEquity: number, freeCashflow: number, totalRevenue: number,
+  divYield: number, sector: string, industry: string
 ) {
   const points: Array<{ title: string; description: string }> = [];
-
-  const revenueGrowth = (financial as { revenueGrowth?: { raw?: number } }).revenueGrowth?.raw || 0;
-  const profitMargin = (financial as { profitMargins?: { raw?: number } }).profitMargins?.raw || 0;
-  const returnOnEquity = (financial as { returnOnEquity?: { raw?: number } }).returnOnEquity?.raw || 0;
-  const freeCashflow = (financial as { freeCashflow?: { raw?: number } }).freeCashflow?.raw || 0;
-  const totalRevenue = (financial as { totalRevenue?: { raw?: number } }).totalRevenue?.raw || 0;
 
   if (revenueGrowth > 0.05) {
     points.push({
@@ -329,18 +436,12 @@ function buildThesis(
   return points;
 }
 
+// ---- Risks builder ----
 function buildRisks(
-  name: string,
-  financial: Record<string, unknown>,
-  keyStats: Record<string, unknown>,
-  sector: string,
-  industry: string,
-  beta: number
+  name: string, debtToEquity: number, currentRatio: number,
+  beta: number, sector: string, industry: string
 ) {
   const points: Array<{ title: string; description: string }> = [];
-
-  const debtToEquity = (financial as { debtToEquity?: { raw?: number } }).debtToEquity?.raw || 0;
-  const currentRatio = (financial as { currentRatio?: { raw?: number } }).currentRatio?.raw || 0;
 
   if (debtToEquity > 100) {
     points.push({
