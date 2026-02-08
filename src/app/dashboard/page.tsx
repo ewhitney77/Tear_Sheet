@@ -11,7 +11,21 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [loadingStep, setLoadingStep] = useState("");
+  const [showFeedback, setShowFeedback] = useState(false);
+  const [fbTicker, setFbTicker] = useState("");
+  const [fbIssues, setFbIssues] = useState("");
+  const [fbSent, setFbSent] = useState(false);
   const router = useRouter();
+
+  const handleFeedback = useCallback(() => {
+    const subject = encodeURIComponent(`Tear Sheet Feedback: ${fbTicker || "General"}`);
+    const body = encodeURIComponent(
+      `Ticker Used: ${fbTicker || "N/A"}\n\nIssues / Feedback:\n${fbIssues || "No additional details"}\n\n---\nSent from Waverly Advisors Tear Sheet Generator\nDate: ${new Date().toLocaleString("en-US")}`
+    );
+    window.open(`mailto:ewhitney777@gmail.com?subject=${subject}&body=${body}`, "_blank");
+    setFbSent(true);
+    setTimeout(() => { setShowFeedback(false); setFbSent(false); setFbTicker(""); setFbIssues(""); }, 2000);
+  }, [fbTicker, fbIssues]);
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
@@ -85,6 +99,12 @@ export default function DashboardPage() {
                 RELEVANT NEWS
               </button>
             )}
+            <button
+              onClick={() => setShowFeedback(true)}
+              className="px-4 py-1.5 text-xs font-medium bg-navy-800 border border-navy-600 text-navy-200 rounded hover:bg-navy-700 hover:text-white transition-all"
+            >
+              FEEDBACK
+            </button>
             <button
               onClick={() => {
                 setStockData(null);
@@ -185,6 +205,52 @@ export default function DashboardPage() {
 
       {/* Tear sheet display */}
       {stockData && !loading && <TearSheet data={stockData} />}
+
+      {/* Feedback Modal */}
+      {showFeedback && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <div className="bg-navy-900 border border-navy-600 rounded-xl shadow-2xl w-full max-w-md">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-navy-700">
+              <h2 className="text-white font-semibold text-sm tracking-wide">SEND FEEDBACK</h2>
+              <button onClick={() => { setShowFeedback(false); setFbSent(false); }} className="text-navy-400 hover:text-white text-lg">&times;</button>
+            </div>
+            {fbSent ? (
+              <div className="px-6 py-10 text-center">
+                <p className="text-green-400 font-medium">Email client opened — thank you!</p>
+              </div>
+            ) : (
+              <div className="px-6 py-5 space-y-4">
+                <div>
+                  <label className="block text-navy-300 text-xs font-medium mb-1.5">Ticker Used</label>
+                  <input
+                    type="text"
+                    value={fbTicker}
+                    onChange={(e) => setFbTicker(e.target.value.toUpperCase())}
+                    placeholder="e.g. AAPL"
+                    className="w-full bg-navy-800 border border-navy-600 rounded-lg px-4 py-2.5 text-white text-sm font-mono placeholder-navy-500 focus:outline-none focus:border-navy-400"
+                  />
+                </div>
+                <div>
+                  <label className="block text-navy-300 text-xs font-medium mb-1.5">Issues / Feedback</label>
+                  <textarea
+                    value={fbIssues}
+                    onChange={(e) => setFbIssues(e.target.value)}
+                    placeholder="Describe any issues or suggestions..."
+                    rows={4}
+                    className="w-full bg-navy-800 border border-navy-600 rounded-lg px-4 py-2.5 text-white text-sm placeholder-navy-500 focus:outline-none focus:border-navy-400 resize-none"
+                  />
+                </div>
+                <button
+                  onClick={handleFeedback}
+                  className="w-full py-2.5 bg-white text-navy-900 font-semibold rounded-lg hover:bg-navy-100 transition-all text-sm tracking-wide"
+                >
+                  SEND FEEDBACK
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

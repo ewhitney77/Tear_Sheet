@@ -206,9 +206,34 @@ export async function GET(request: NextRequest) {
       });
     }
 
+    // ---- EBITDA History ----
+    const ebitdaHistory: Array<{ year: string; ebitda: number }> = [];
+    for (const stmt of sortedIncome) {
+      const ebitda = stmt.ebitda || 0;
+      if (ebitda !== 0) {
+        ebitdaHistory.push({
+          year: stmt.calendarYear || stmt.date?.substring(0, 4) || "",
+          ebitda,
+        });
+      }
+    }
+
+    // ---- EV/Revenue History ----
+    const evRevenueHistory: Array<{ date: string; evRevenue: number }> = [];
+    for (const r of sortedRatios) {
+      const evRev = r.enterpriseValueOverRevenue || r.evToRevenue;
+      if (evRev && evRev > 0 && evRev < 200) {
+        evRevenueHistory.push({
+          date: r.date || "",
+          evRevenue: Math.round(evRev * 10) / 10,
+        });
+      }
+    }
+
     // ---- Revenue Segments ----
     const revenueBySegment = processSegments(revSegRaw, SEGMENT_COLORS, industry);
-    const revenueByGeography = processGeoSegments(geoSegRaw, SEGMENT_COLORS, country);
+    // For geography: use actual FMP data, fallback to generic regions (NOT HQ country)
+    const revenueByGeography = processGeoSegments(geoSegRaw, SEGMENT_COLORS);
 
     // ---- Forward P/E and Comps ----
     const forwardPE = ratios[0]?.priceEarningsRatio
@@ -267,7 +292,9 @@ export async function GET(request: NextRequest) {
       priceHistory: priceHistoryArr,
       epsEstimates,
       peHistory,
+      evRevenueHistory,
       revenueHistory,
+      ebitdaHistory,
       revenueBySegment,
       revenueByGeography,
       forwardPE,
@@ -375,16 +402,15 @@ function processSegments(
 function processGeoSegments(
   raw: unknown,
   colors: string[],
-  country: string
 ): Array<{ name: string; value: number; color: string }> {
   try {
     const arr = raw as Array<Record<string, unknown>>;
     if (!arr || arr.length === 0) {
       return [
-        { name: country, value: 60, color: colors[0] },
-        { name: "Europe", value: 20, color: colors[2] },
-        { name: "Asia Pacific", value: 12, color: colors[4] },
-        { name: "Other", value: 8, color: colors[6] },
+        { name: "Americas", value: 55, color: colors[0] },
+        { name: "Europe", value: 25, color: colors[2] },
+        { name: "Asia Pacific", value: 15, color: colors[4] },
+        { name: "Other", value: 5, color: colors[6] },
       ];
     }
 
@@ -408,10 +434,10 @@ function processGeoSegments(
 
     if (segments.length === 0) {
       return [
-        { name: country, value: 60, color: colors[0] },
-        { name: "Europe", value: 20, color: colors[2] },
-        { name: "Asia Pacific", value: 12, color: colors[4] },
-        { name: "Other", value: 8, color: colors[6] },
+        { name: "Americas", value: 55, color: colors[0] },
+        { name: "Europe", value: 25, color: colors[2] },
+        { name: "Asia Pacific", value: 15, color: colors[4] },
+        { name: "Other", value: 5, color: colors[6] },
       ];
     }
 

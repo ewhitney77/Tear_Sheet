@@ -16,7 +16,9 @@ export interface StockData {
   priceHistory: PricePoint[];
   epsEstimates: EPSPoint[];
   peHistory: PEPoint[];
+  evRevenueHistory: EVRevenuePoint[];
   revenueHistory: RevenuePoint[];
+  ebitdaHistory: EBITDAPoint[];
   revenueBySegment: SegmentData[];
   revenueByGeography: SegmentData[];
   forwardPE: number;
@@ -48,10 +50,20 @@ export interface PEPoint {
   pe: number;
 }
 
+export interface EVRevenuePoint {
+  date: string;
+  evRevenue: number;
+}
+
 export interface RevenuePoint {
   year: string;
   revenue: number;
   growth: number | null;
+}
+
+export interface EBITDAPoint {
+  year: string;
+  ebitda: number;
 }
 
 export interface SegmentData {

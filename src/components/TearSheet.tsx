@@ -146,10 +146,12 @@ export default function TearSheet({ data }: Props) {
               <EPSChart data={data.epsEstimates} compact />
             </div>
 
-            {/* P/E History */}
+            {/* P/E History or EV/Revenue fallback */}
             <div className="border border-gray-200 rounded p-2 mb-3">
-              <h3 className="text-[10px] font-bold text-gray-900 mb-1 underline">P/E History</h3>
-              <PEChart data={data.peHistory} compact />
+              <h3 className="text-[10px] font-bold text-gray-900 mb-1 underline">
+                {data.peHistory && data.peHistory.length > 0 ? "P/E History" : "EV/Revenue History"}
+              </h3>
+              <PEChart data={data.peHistory} evRevenueData={data.evRevenueHistory} compact />
             </div>
 
             {/* Revenue Growth */}
@@ -199,6 +201,7 @@ export default function TearSheet({ data }: Props) {
                 segmentData={data.revenueBySegment}
                 geoData={data.revenueByGeography}
                 revenueHistory={data.revenueHistory}
+                ebitdaHistory={data.ebitdaHistory}
               />
             </div>
 
