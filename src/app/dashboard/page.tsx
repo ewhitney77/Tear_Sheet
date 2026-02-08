@@ -1,9 +1,111 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import TearSheet from "@/components/TearSheet";
 import { StockData } from "@/lib/types";
 import { useRouter } from "next/navigation";
+
+function LoadingScreen({ ticker, loadingStep }: { ticker: string; loadingStep: string }) {
+  const [logs, setLogs] = useState<string[]>([]);
+  const [progress, setProgress] = useState(0);
+  const logsEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (loadingStep) {
+      setLogs((prev) => [...prev, `[${new Date().toLocaleTimeString("en-US", { hour12: false })}] ${loadingStep}`]);
+    }
+  }, [loadingStep]);
+
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setProgress((p) => Math.min(p + 0.7, 95));
+    }, 200);
+    return () => clearInterval(interval);
+  }, []);
+
+  return (
+    <div className="flex flex-col items-center justify-center min-h-[calc(100vh-56px)] px-6">
+      <div className="w-full max-w-2xl">
+        {/* Header */}
+        <div className="flex items-center gap-4 mb-6">
+          <div className="relative flex-shrink-0">
+            <div className="w-12 h-12 border border-navy-600 rounded-lg flex items-center justify-center bg-navy-800/50">
+              <svg className="w-6 h-6 text-white animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3.75 3v11.25A2.25 2.25 0 006 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0118 16.5h-2.25m-7.5 0h7.5m-7.5 0l-1 3m8.5-3l1 3m0 0l.5 1.5m-.5-1.5h-9.5m0 0l-.5 1.5M9 11.25v1.5M12 9v3.75m3-6v6" />
+              </svg>
+            </div>
+            <div className="absolute -top-1 -right-1 w-3 h-3 bg-green-400 rounded-full animate-ping" />
+            <div className="absolute -top-1 -right-1 w-3 h-3 bg-green-400 rounded-full" />
+          </div>
+          <div>
+            <h2 className="text-white font-semibold text-lg">
+              Generating Research Report: <span className="font-mono text-blue-300">{ticker}</span>
+            </h2>
+            <p className="text-navy-400 text-xs font-mono mt-0.5">
+              WAVERLY ADVISORS EQUITY RESEARCH ENGINE v2.1
+            </p>
+          </div>
+        </div>
+
+        {/* Progress bar */}
+        <div className="mb-4">
+          <div className="flex justify-between items-center mb-1.5">
+            <span className="text-navy-400 text-xs font-mono">PROGRESS</span>
+            <span className="text-navy-300 text-xs font-mono">{Math.round(progress)}%</span>
+          </div>
+          <div className="w-full bg-navy-800 rounded-full h-2 overflow-hidden">
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-blue-500 via-blue-400 to-cyan-400 transition-all duration-300 ease-out"
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+        </div>
+
+        {/* Terminal log */}
+        <div className="bg-navy-950 border border-navy-700 rounded-lg overflow-hidden">
+          <div className="flex items-center gap-2 px-4 py-2 bg-navy-900 border-b border-navy-700">
+            <div className="w-2.5 h-2.5 rounded-full bg-red-500" />
+            <div className="w-2.5 h-2.5 rounded-full bg-yellow-500" />
+            <div className="w-2.5 h-2.5 rounded-full bg-green-500" />
+            <span className="text-navy-500 text-xs font-mono ml-2">data-pipeline.log</span>
+          </div>
+          <div className="p-4 h-48 overflow-y-auto font-mono text-xs leading-relaxed" style={{ scrollbarWidth: "thin" }}>
+            <div className="text-green-400 mb-1">$ waverly-research --ticker {ticker} --mode full-analysis</div>
+            <div className="text-navy-500 mb-2">Initializing Waverly Advisors Research Engine...</div>
+            {logs.map((log, i) => (
+              <div key={i} className={`mb-0.5 ${i === logs.length - 1 ? "text-cyan-300" : "text-navy-400"}`}>
+                {log}
+              </div>
+            ))}
+            <div className="inline-block w-2 h-3.5 bg-cyan-400 animate-pulse" />
+            <div ref={logsEndRef} />
+          </div>
+        </div>
+
+        {/* Status indicators */}
+        <div className="mt-4 grid grid-cols-3 gap-3">
+          {[
+            { label: "Data Sources", value: "FMP + Yahoo", status: "active" },
+            { label: "AI Analysis", value: "Claude Haiku", status: progress > 60 ? "active" : "pending" },
+            { label: "Report Engine", value: "Compiling", status: progress > 80 ? "active" : "pending" },
+          ].map((item) => (
+            <div key={item.label} className="bg-navy-800/50 border border-navy-700 rounded-lg px-3 py-2">
+              <div className="flex items-center gap-1.5 mb-1">
+                <div className={`w-1.5 h-1.5 rounded-full ${item.status === "active" ? "bg-green-400 animate-pulse" : "bg-navy-500"}`} />
+                <span className="text-navy-400 text-[10px] font-mono uppercase">{item.label}</span>
+              </div>
+              <span className={`text-xs font-mono ${item.status === "active" ? "text-white" : "text-navy-500"}`}>{item.value}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function DashboardPage() {
   const [ticker, setTicker] = useState("");
@@ -37,12 +139,20 @@ export default function DashboardPage() {
       setStockData(null);
 
       const steps = [
-        "Connecting to market data feeds...",
-        "Fetching company fundamentals...",
-        "Loading price history...",
-        "Analyzing earnings estimates...",
-        "Computing valuation multiples...",
-        "Generating research report...",
+        "Initializing secure connection to market data feeds...",
+        "Querying Financial Modeling Prep API for fundamentals...",
+        "Fetching 5-year daily price history from multiple sources...",
+        "Cross-referencing Yahoo Finance for data validation...",
+        "Extracting income statements and balance sheet data...",
+        "Computing P/E ratios, EV/Revenue, and valuation multiples...",
+        "Analyzing revenue segmentation by business line...",
+        "Processing geographic revenue distribution...",
+        "Retrieving consensus analyst estimates...",
+        "Calculating EBITDA margins and free cash flow metrics...",
+        "Engaging AI research analyst for thesis generation...",
+        "Synthesizing investment thesis and risk factors...",
+        "Compiling citations and data sources...",
+        "Rendering equity research tear sheet...",
       ];
 
       let stepIdx = 0;
@@ -52,7 +162,7 @@ export default function DashboardPage() {
         if (stepIdx < steps.length) {
           setLoadingStep(steps[stepIdx]);
         }
-      }, 1500);
+      }, 1200);
 
       try {
         const res = await fetch(`/api/stock?ticker=${ticker.trim().toUpperCase()}`);
@@ -180,28 +290,8 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Loading state */}
-      {loading && (
-        <div className="flex flex-col items-center justify-center min-h-[calc(100vh-56px)] px-6">
-          <div className="w-full max-w-md">
-            <div className="flex items-center justify-center mb-8">
-              <div className="relative">
-                <div className="w-16 h-16 border-2 border-navy-700 rounded-full" />
-                <div className="absolute inset-0 w-16 h-16 border-2 border-t-white rounded-full animate-spin" />
-              </div>
-            </div>
-            <div className="text-center">
-              <p className="text-white font-medium mb-2">
-                Generating Tear Sheet for <span className="font-mono">{ticker}</span>
-              </p>
-              <p className="text-navy-400 text-sm font-mono">{loadingStep}</p>
-            </div>
-            <div className="mt-6 w-full bg-navy-800 rounded-full h-1">
-              <div className="h-1 rounded-full bg-white animate-pulse" style={{ width: "60%" }} />
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Loading state - advanced terminal look */}
+      {loading && <LoadingScreen ticker={ticker} loadingStep={loadingStep} />}
 
       {/* Tear sheet display */}
       {stockData && !loading && <TearSheet data={stockData} />}
