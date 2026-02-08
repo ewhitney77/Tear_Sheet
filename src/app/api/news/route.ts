@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
+const FMP_BASE = "https://financialmodelingprep.com/api/v3";
+const API_KEY = process.env.FMP_API_KEY || "";
+
 export async function GET(request: NextRequest) {
   const ticker = request.nextUrl.searchParams.get("ticker")?.toUpperCase();
   if (!ticker) {
@@ -15,38 +18,33 @@ export async function GET(request: NextRequest) {
       publishedAt: string;
     }> = [];
 
-    // Try Yahoo Finance search endpoint for news
-    try {
-      const newsResponse = await fetch(
-        `https://query1.finance.yahoo.com/v1/finance/search?q=${ticker}&newsCount=20&enableFuzzyQuery=false&quotesCount=0`,
-        {
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          },
-        }
-      );
+    // Fetch news from FMP
+    if (API_KEY) {
+      try {
+        const res = await fetch(
+          `${FMP_BASE}/stock_news?tickers=${ticker}&limit=25&apikey=${API_KEY}`,
+          { next: { revalidate: 300 } }
+        );
 
-      if (newsResponse.ok) {
-        const newsData = await newsResponse.json();
-        const news = newsData.news || [];
-
-        for (const item of news) {
-          if (item.title) {
-            articles.push({
-              title: item.title,
-              description: item.title,
-              url: item.link || `https://finance.yahoo.com/quote/${ticker}/news`,
-              source: item.publisher || "Yahoo Finance",
-              publishedAt: item.providerPublishTime
-                ? new Date(item.providerPublishTime * 1000).toISOString()
-                : new Date().toISOString(),
-            });
+        if (res.ok) {
+          const newsData = await res.json();
+          if (Array.isArray(newsData)) {
+            for (const item of newsData) {
+              if (item.title) {
+                articles.push({
+                  title: item.title,
+                  description: item.text || item.title,
+                  url: item.url || `https://finance.yahoo.com/quote/${ticker}/news`,
+                  source: item.site || "Financial News",
+                  publishedAt: item.publishedDate || new Date().toISOString(),
+                });
+              }
+            }
           }
         }
+      } catch {
+        // Fall through to fallback
       }
-    } catch {
-      // Fall through to fallback links
     }
 
     // Fallback: provide direct links to reputable financial news sources
