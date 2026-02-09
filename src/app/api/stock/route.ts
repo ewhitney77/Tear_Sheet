@@ -450,21 +450,26 @@ export async function GET(request: NextRequest) {
     const divGrowthEst = computeDivGrowth(fmpKeyMetrics);
     const shortRatio = safe(fmpKeyMetrics[0]?.shortTermCoverageRatios) || ynum(yKeyStats?.shortRatio);
 
-    // ====== PHASE 6: Claude AI enrichment ======
+    // ====== PHASE 6: Claude AI enrichment (wrapped in try/catch - must never crash pipeline) ======
     const marketCapStr = formatMcap(marketCap);
-    const enrichment = await claudeEnrich(ticker, companyName, sector, industry, marketCapStr, {
-      revenue: totalRev > 0 ? totalRev : undefined,
-      revenueGrowth: revGrowth,
-      profitMargin,
-      eps: latestEps || undefined,
-      pe: forwardPE || undefined,
-      beta: beta !== 1 ? beta : undefined,
-      debtToEquity,
-      divYield: divYieldPct > 0 ? divYieldPct / 100 : undefined,
-      fcfMargin,
-      roe,
-    });
-    log.push(`Claude enrichment: ${enrichment ? "OK" : "FAILED/SKIPPED"}`);
+    let enrichment: { description: string; thesis: { title: string; description: string }[]; risks: { title: string; description: string }[] } | null = null;
+    try {
+      enrichment = await claudeEnrich(ticker, companyName, sector, industry, marketCapStr, {
+        revenue: totalRev > 0 ? totalRev : undefined,
+        revenueGrowth: revGrowth,
+        profitMargin,
+        eps: ttmEps || undefined,
+        pe: forwardPE || undefined,
+        beta: beta !== 1 ? beta : undefined,
+        debtToEquity,
+        divYield: divYieldPct > 0 ? divYieldPct / 100 : undefined,
+        fcfMargin,
+        roe,
+      });
+      log.push(`Claude enrichment: ${enrichment ? "OK" : "FAILED/SKIPPED"}`);
+    } catch (e) {
+      log.push(`Claude enrichment: CRASHED (${e instanceof Error ? e.message : "unknown"})`);
+    }
 
     const description = enrichment?.description || buildFallbackDescription(companyName, sector, industry);
     const thesis = enrichment?.thesis?.length ? enrichment.thesis : buildFallbackThesis(companyName, revGrowth, profitMargin, sector, industry);
@@ -475,39 +480,40 @@ export async function GET(request: NextRequest) {
     log.push(`Total: ${elapsed}ms`);
     console.log(`[${ticker}] ${log.join(" | ")}`);
 
+    // ====== PHASE 7: Build response with safe defaults (never return undefined/NaN) ======
     const today = new Date().toISOString().split("T")[0];
-    return NextResponse.json({
-      companyName,
+    const response = {
+      companyName: companyName || ticker,
       ticker,
-      marketCap,
-      marketCapFormatted: marketCapStr,
-      sector,
-      industry,
-      dividendYield: Math.round(divYieldPct * 10) / 10,
-      dividendGrowthEst: divGrowthEst,
-      shortInterestRatio: Math.round(Math.abs(shortRatio) * 10) / 10,
-      analystRating,
-      riskRating,
+      marketCap: safe(marketCap),
+      marketCapFormatted: marketCapStr || "N/A",
+      sector: sector || "N/A",
+      industry: industry || "N/A",
+      dividendYield: safe(Math.round(divYieldPct * 10) / 10),
+      dividendGrowthEst: safe(divGrowthEst),
+      shortInterestRatio: safe(Math.round(Math.abs(shortRatio) * 10) / 10),
+      analystRating: analystRating || "Hold",
+      riskRating: riskRating || "Medium",
       appropriatenessRating: beta < 1.5 ? "All" : "Moderate/Aggressive",
-      description,
-      thesis,
-      risks,
-      priceHistory: priceHistoryArr,
-      epsEstimates,
-      peHistory,
-      evRevenueHistory,
-      revenueHistory,
-      ebitdaHistory,
-      revenueBySegment,
-      revenueByGeography,
-      forwardPE,
-      compAvgPE,
-      evEbitda,
-      evRevenue,
-      revGrowthTable,
-      currentPrice: Math.round(currentPrice * 100) / 100,
-      priceChange: Math.round(priceChange * 100) / 100,
-      priceChangePercent: Math.round(priceChangePercent * 100) / 100,
+      description: description || `${companyName || ticker} is a publicly traded company.`,
+      thesis: Array.isArray(thesis) && thesis.length > 0 ? thesis : [{ title: "Market Position", description: `${companyName || ticker} operates in the ${industry} industry.` }],
+      risks: Array.isArray(risks) && risks.length > 0 ? risks : [{ title: "Market Risk", description: "Subject to general market and economic conditions." }],
+      priceHistory: Array.isArray(priceHistoryArr) ? priceHistoryArr : [],
+      epsEstimates: Array.isArray(epsEstimates) ? epsEstimates : [],
+      peHistory: Array.isArray(peHistory) ? peHistory : [],
+      evRevenueHistory: Array.isArray(evRevenueHistory) ? evRevenueHistory : [],
+      revenueHistory: Array.isArray(revenueHistory) ? revenueHistory : [],
+      ebitdaHistory: Array.isArray(ebitdaHistory) ? ebitdaHistory : [],
+      revenueBySegment: Array.isArray(revenueBySegment) ? revenueBySegment : [],
+      revenueByGeography: Array.isArray(revenueByGeography) ? revenueByGeography : [],
+      forwardPE: safe(forwardPE),
+      compAvgPE: safe(compAvgPE),
+      evEbitda: safe(evEbitda),
+      evRevenue: safe(evRevenue),
+      revGrowthTable: Array.isArray(revGrowthTable) ? revGrowthTable : [],
+      currentPrice: safe(Math.round(currentPrice * 100) / 100),
+      priceChange: safe(Math.round(priceChange * 100) / 100),
+      priceChangePercent: safe(Math.round(priceChangePercent * 100) / 100),
       generatedDate: new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }),
       analystName: "Michael Whitney, CFA",
       firmName: "Waverly Advisors",
@@ -521,7 +527,14 @@ export async function GET(request: NextRequest) {
         { source: "FactSet Research Systems", url: "https://www.factset.com/", description: "Consensus estimates and analytics", accessDate: today },
       ],
       _debug: { log, elapsed },
-    });
+    };
+
+    // Data quality warnings
+    if (response.marketCap <= 0) log.push("WARNING: Market cap is $0");
+    if (response.revenueHistory.length === 0) log.push("WARNING: No revenue history");
+    if (response.priceHistory.length === 0) log.push("WARNING: No price history");
+
+    return NextResponse.json(response);
   } catch (error) {
     console.error(`[${ticker}] FATAL:`, error, "Log:", log.join(" | "));
     return NextResponse.json(

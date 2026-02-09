@@ -96,9 +96,9 @@ export default function TearSheet({ data }: Props) {
                   ["Market Cap.", formatMarketCap(data.marketCap)],
                   ["Sector", data.sector],
                   ["Industry", data.industry],
-                  ["Dividend Yield", `${data.dividendYield.toFixed(1)}%`],
-                  ["Div. Growth Est.", `${data.dividendGrowthEst.toFixed(1)}%`],
-                  ["Short Interest Ratio", data.shortInterestRatio.toFixed(1)],
+                  ["Dividend Yield", `${(data.dividendYield ?? 0).toFixed(1)}%`],
+                  ["Div. Growth Est.", `${(data.dividendGrowthEst ?? 0).toFixed(1)}%`],
+                  ["Short Interest Ratio", (data.shortInterestRatio ?? 0).toFixed(1)],
                   ["W.A. Analyst Rating", data.analystRating],
                   ["W.A. Risk Rating", data.riskRating],
                   ["Appropriateness Rating", data.appropriatenessRating],
@@ -177,7 +177,7 @@ export default function TearSheet({ data }: Props) {
             {/* Thesis */}
             <div className="border border-gray-200 rounded p-3">
               <h3 className="text-sm font-bold text-navy-900 underline mb-2">Thesis:</h3>
-              {data.thesis.map((point, i) => (
+              {(data.thesis || []).map((point, i) => (
                 <div key={i} className="mb-1.5">
                   <p className="text-[11px] leading-relaxed text-gray-700">
                     <span className="font-bold text-gray-900">{point.title}:</span> {point.description}
@@ -189,7 +189,7 @@ export default function TearSheet({ data }: Props) {
             {/* Risks */}
             <div className="border border-gray-200 rounded p-3">
               <h3 className="text-sm font-bold text-navy-900 underline mb-2">Risks (Where we could be wrong):</h3>
-              {data.risks.map((point, i) => (
+              {(data.risks || []).map((point, i) => (
                 <div key={i} className="mb-1.5">
                   <p className="text-[11px] leading-relaxed text-gray-700">
                     <span className="font-bold text-gray-900">{point.title}:</span> {point.description}
@@ -201,10 +201,10 @@ export default function TearSheet({ data }: Props) {
             {/* Revenue & EBITDA Trends + Segments */}
             <div className="border border-gray-200 rounded p-2">
               <SegmentCharts
-                segmentData={data.revenueBySegment}
-                geoData={data.revenueByGeography}
-                revenueHistory={data.revenueHistory}
-                ebitdaHistory={data.ebitdaHistory}
+                segmentData={data.revenueBySegment || []}
+                geoData={data.revenueByGeography || []}
+                revenueHistory={data.revenueHistory || []}
+                ebitdaHistory={data.ebitdaHistory || []}
               />
             </div>
           </div>
@@ -240,7 +240,7 @@ export default function TearSheet({ data }: Props) {
                 </tr>
               </thead>
               <tbody>
-                {data.citations.map((c, i) => (
+                {(data.citations || []).map((c, i) => (
                   <tr key={i} className={`${i % 2 === 0 ? "bg-gray-50" : "bg-white"} border-b border-gray-100`}>
                     <td className="py-2 px-2 text-gray-500">{i + 1}</td>
                     <td className="py-2 px-2 font-medium text-gray-900">{c.source}</td>

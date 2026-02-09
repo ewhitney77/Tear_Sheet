@@ -41,7 +41,7 @@ function renderCustomLabel({
   );
 }
 
-export default function SegmentCharts({ segmentData, geoData, revenueHistory, ebitdaHistory }: Props) {
+export default function SegmentCharts({ segmentData = [], geoData = [], revenueHistory = [], ebitdaHistory = [] }: Props) {
   const formatRevenue = (val: number) => {
     if (Math.abs(val) >= 1e9) return `$${(val / 1e9).toFixed(1)}B`;
     if (Math.abs(val) >= 1e6) return `$${(val / 1e6).toFixed(0)}M`;
@@ -66,26 +66,30 @@ export default function SegmentCharts({ segmentData, geoData, revenueHistory, eb
         {/* Revenue over time */}
         <div className="flex-1" style={{ minWidth: 0 }}>
           <div className="text-[8px] font-bold text-gray-600 text-center mb-1 uppercase tracking-wider">Revenue</div>
-          <ResponsiveContainer width="100%" height={150}>
-            <BarChart data={revenueHistory} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-              <XAxis dataKey="year"
-                tick={{ fontSize: 8, fill: "#627d98", fontFamily: "JetBrains Mono, monospace" }}
-                axisLine={{ stroke: "#bcccdc" }} tickLine={false} />
-              <YAxis
-                tick={{ fontSize: 7, fill: "#627d98", fontFamily: "JetBrains Mono, monospace" }}
-                axisLine={false} tickLine={false} width={42} tickFormatter={formatAxis} />
-              <Tooltip contentStyle={{
-                backgroundColor: "#0a1929", border: "1px solid #334e68",
-                borderRadius: "4px", fontSize: "10px", fontFamily: "JetBrains Mono, monospace", color: "#fff",
-              }} formatter={(value: number) => [formatRevenue(value), "Revenue"]} />
-              <Bar dataKey="revenue" radius={[2, 2, 0, 0]}>
-                {revenueHistory.map((_, i) => (
-                  <Cell key={i} fill={i === revenueHistory.length - 1 ? "#0a1929" : "#627d98"} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
+          {revenueHistory.length > 0 ? (
+            <ResponsiveContainer width="100%" height={150}>
+              <BarChart data={revenueHistory} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                <XAxis dataKey="year"
+                  tick={{ fontSize: 8, fill: "#627d98", fontFamily: "JetBrains Mono, monospace" }}
+                  axisLine={{ stroke: "#bcccdc" }} tickLine={false} />
+                <YAxis
+                  tick={{ fontSize: 7, fill: "#627d98", fontFamily: "JetBrains Mono, monospace" }}
+                  axisLine={false} tickLine={false} width={42} tickFormatter={formatAxis} />
+                <Tooltip contentStyle={{
+                  backgroundColor: "#0a1929", border: "1px solid #334e68",
+                  borderRadius: "4px", fontSize: "10px", fontFamily: "JetBrains Mono, monospace", color: "#fff",
+                }} formatter={(value: number) => [formatRevenue(value), "Revenue"]} />
+                <Bar dataKey="revenue" radius={[2, 2, 0, 0]}>
+                  {revenueHistory.map((_, i) => (
+                    <Cell key={i} fill={i === revenueHistory.length - 1 ? "#0a1929" : "#627d98"} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="text-gray-400 text-xs text-center py-12">No revenue data</div>
+          )}
         </div>
 
         {/* EBITDA over time */}
