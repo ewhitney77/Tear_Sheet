@@ -201,15 +201,17 @@ export async function GET(request: NextRequest) {
   try {
     // ====== PHASE 1: Fetch all data sources in parallel ======
     const fmpPromises = FMP_KEY ? [
-      fmpFetch(`/profile/${ticker}`),
-      fmpFetch(`/income-statement/${ticker}?limit=6`),
-      fmpFetch(`/ratios/${ticker}?limit=40`),
-      fmpFetch(`/key-metrics/${ticker}?limit=6`),
-      fmpFetch(`/historical-price-full/${ticker}?serietype=line`),
-      fmpFetch(`/analyst-estimates/${ticker}?limit=12`),
-      fmpFetch(`/rating/${ticker}`),
-      fmpFetch(`/revenue-product-segmentation?symbol=${ticker}&structure=flat&period=annual`),
-      fmpFetch(`/revenue-geographic-segmentation?symbol=${ticker}&structure=flat&period=annual`),
+      fmpFetch(`/profile/${ticker}`),                                                    // 0
+      fmpFetch(`/income-statement/${ticker}?period=quarter&limit=8`),                    // 1 - QUARTERLY
+      fmpFetch(`/ratios/${ticker}?limit=10`),                                            // 2
+      fmpFetch(`/key-metrics/${ticker}?limit=6`),                                        // 3
+      fmpFetch(`/historical-price-full/${ticker}?serietype=line`),                       // 4
+      fmpFetch(`/analyst-estimates/${ticker}?limit=12`),                                 // 5
+      fmpFetch(`/rating/${ticker}`),                                                     // 6
+      fmpFetch(`/revenue-product-segmentation?symbol=${ticker}&structure=flat&period=annual`),  // 7
+      fmpFetch(`/revenue-geographic-segmentation?symbol=${ticker}&structure=flat&period=annual`), // 8
+      fmpFetch(`/enterprise-values/${ticker}?period=quarter&limit=8`),                   // 9 - EV data
+      fmpFetch(`/income-statement/${ticker}?limit=6`),                                   // 10 - ANNUAL for annual ratios
     ] : [];
 
     const [fmpSettled, yahooSummary, yahooChartWeekly] = await Promise.all([
@@ -221,7 +223,7 @@ export async function GET(request: NextRequest) {
     const fmp = fmpSettled as PromiseSettledResult<unknown>[];
 
     // Log what succeeded/failed
-    const fmpNames = ["profile", "income", "ratios", "keyMetrics", "price", "estimates", "rating", "revSeg", "geoSeg"];
+    const fmpNames = ["profile", "incomeQ", "ratios", "keyMetrics", "price", "estimates", "rating", "revSeg", "geoSeg", "evData", "incomeA"];
     fmp.forEach((r, i) => {
       if (r.status === "rejected") log.push(`FMP ${fmpNames[i]}: FAILED (${r.reason?.message || "unknown"})`);
       else {
@@ -243,6 +245,8 @@ export async function GET(request: NextRequest) {
     const fmpRating = arr(getResult(fmp[6]))[0] as Record<string, unknown> | undefined;
     const fmpRevSeg = getResult(fmp[7]);
     const fmpGeoSeg = getResult(fmp[8]);
+    const fmpEV = arr(getResult(fmp[9])) as Record<string, unknown>[];
+    const fmpIncomeAnnual = arr(getResult(fmp[10])) as Record<string, unknown>[];
 
     // Yahoo modules
     const yPrice = (yahooSummary?.price || {}) as Record<string, unknown>;
@@ -321,107 +325,116 @@ export async function GET(request: NextRequest) {
       log.push(`Price history: Yahoo (${priceHistoryArr.length} pts)`);
     }
 
-    // ====== PHASE 5: Financial data (FMP primary, Yahoo fallback for key metrics) ======
-    const sortedIncome = [...fmpIncome].reverse();
+    // ====== PHASE 5: Financial data - QUARTERLY (trailing 8 quarters) ======
+    const sortedIncomeQ = [...fmpIncome].reverse(); // quarterly, chronological
+    const sortedIncomeA = [...fmpIncomeAnnual].reverse(); // annual, chronological
     const sortedRatios = [...fmpRatios].reverse();
+    const sortedEV = [...fmpEV].reverse();
 
-    // EPS estimates
-    const epsEstimates: Array<{ period: string; actual: number | null; estimate: number | null }> = [];
-    if (sortedIncome.length > 0) {
-      for (const stmt of sortedIncome) {
-        epsEstimates.push({
-          period: str(stmt.calendarYear) || str(stmt.date)?.substring(0, 4) || "",
-          actual: stmt.eps != null ? safe(stmt.eps) : null,
-          estimate: null,
+    // Format quarter label: "Q1 '23"
+    const qLabel = (stmt: Record<string, unknown>) => {
+      const d = str(stmt.date);
+      const period = str(stmt.period);
+      const year = d.substring(2, 4) || "";
+      // FMP uses Q1-Q4 in period field
+      const q = period || (() => {
+        const month = parseInt(d.substring(5, 7));
+        if (month <= 3) return "Q1";
+        if (month <= 6) return "Q2";
+        if (month <= 9) return "Q3";
+        return "Q4";
+      })();
+      return `${q} '${year}`;
+    };
+
+    // Revenue History (quarterly)
+    const revenueHistory: Array<{ year: string; revenue: number; growth: number | null }> = [];
+    for (let i = 0; i < sortedIncomeQ.length; i++) {
+      const rev = safe(sortedIncomeQ[i].revenue);
+      // YoY quarterly growth (compare to same quarter last year = i-4)
+      const prevYoY = i >= 4 ? safe(sortedIncomeQ[i - 4].revenue) : 0;
+      revenueHistory.push({
+        year: qLabel(sortedIncomeQ[i]),
+        revenue: rev,
+        growth: prevYoY > 0 ? Math.round(((rev - prevYoY) / prevYoY) * 1000) / 10 : null,
+      });
+    }
+
+    // EBITDA History (quarterly)
+    const ebitdaHistory: Array<{ year: string; ebitda: number }> = [];
+    for (const stmt of sortedIncomeQ) {
+      const ebitda = safe(stmt.ebitda);
+      // Include even if 0 for quarters - shows the trend
+      ebitdaHistory.push({ year: qLabel(stmt), ebitda });
+    }
+
+    // Valuation metrics: EV/EBITDA, EV/Revenue, P/E
+    // Use latest EV and trailing 4Q financials
+    const latestEVVal = sortedEV.length > 0 ? safe(sortedEV[sortedEV.length - 1]?.enterpriseValue) : 0;
+    const trailing4Q = sortedIncomeQ.slice(-4);
+    const ttmRevenue = trailing4Q.reduce((s, q) => s + safe(q.revenue), 0);
+    const ttmEbitda = trailing4Q.reduce((s, q) => s + safe(q.ebitda), 0);
+    const ttmNetIncome = trailing4Q.reduce((s, q) => s + safe(q.netIncome), 0);
+
+    const evEbitda = latestEVVal > 0 && ttmEbitda > 0 ? Math.round((latestEVVal / ttmEbitda) * 10) / 10 : 0;
+    const evRevenue = latestEVVal > 0 && ttmRevenue > 0 ? Math.round((latestEVVal / ttmRevenue) * 10) / 10 : 0;
+
+    // Revenue growth table (annual YoY from annual statements)
+    const revGrowthTable: Array<{ year: string; growth: number }> = [];
+    for (let i = 1; i < sortedIncomeA.length; i++) {
+      const curr = safe(sortedIncomeA[i].revenue);
+      const prev = safe(sortedIncomeA[i - 1].revenue);
+      if (prev > 0) {
+        revGrowthTable.push({
+          year: str(sortedIncomeA[i].calendarYear) || str(sortedIncomeA[i].date)?.substring(0, 4) || "",
+          growth: Math.round(((curr - prev) / prev) * 1000) / 10,
         });
       }
     }
-    // Yahoo earnings trend for estimates
-    const yTrend = arr((yEarnings as Record<string, unknown>)?.trend) as Record<string, unknown>[];
-    for (const t of yTrend) {
-      const period = str(t.period);
-      if (period && (period.includes("y") || period === "0q")) {
-        const est = ynum((t.earningsEstimate as Record<string, unknown>)?.avg);
-        if (est !== 0) {
-          const year = str(t.endDate)?.substring(0, 4) || period;
-          const existing = epsEstimates.find(e => e.period === year);
-          if (existing) existing.estimate = est;
-          else epsEstimates.push({ period: year, actual: null, estimate: est });
-        }
-      }
-    }
-    // Also add from FMP estimates
-    for (const est of fmpEstimates.filter(e => new Date(str(e.date)) > new Date()).reverse().slice(0, 3)) {
-      const year = str(est.date)?.substring(0, 4) || "";
-      const existing = epsEstimates.find(e => e.period === year);
-      if (existing && !existing.estimate) existing.estimate = safe(est.estimatedEpsAvg);
-      else if (!existing) epsEstimates.push({ period: year, actual: null, estimate: safe(est.estimatedEpsAvg) });
-    }
 
-    // P/E History
+    // P/E and EV/Revenue history (keep for potential use)
     const peHistory: Array<{ date: string; pe: number }> = [];
+    const evRevenueHistory: Array<{ date: string; evRevenue: number }> = [];
     for (const r of sortedRatios) {
       const pe = safe(r.priceEarningsRatio);
       if (pe > 0 && pe < 200) peHistory.push({ date: str(r.date), pe: Math.round(pe * 10) / 10 });
-    }
-
-    // EV/Revenue History
-    const evRevenueHistory: Array<{ date: string; evRevenue: number }> = [];
-    for (const r of sortedRatios) {
       const evRev = safe(r.enterpriseValueOverRevenue) || safe(r.evToRevenue);
       if (evRev > 0 && evRev < 200) evRevenueHistory.push({ date: str(r.date), evRevenue: Math.round(evRev * 10) / 10 });
     }
 
-    // Revenue History
-    const revenueHistory: Array<{ year: string; revenue: number; growth: number | null }> = [];
-    for (let i = 0; i < sortedIncome.length; i++) {
-      const rev = safe(sortedIncome[i].revenue);
-      const prev = i > 0 ? safe(sortedIncome[i - 1].revenue) : 0;
-      revenueHistory.push({
-        year: str(sortedIncome[i].calendarYear) || str(sortedIncome[i].date)?.substring(0, 4) || "",
-        revenue: rev,
-        growth: i > 0 && prev > 0 ? Math.round(((rev - prev) / prev) * 1000) / 10 : null,
-      });
+    // EPS from quarterly data
+    const epsEstimates: Array<{ period: string; actual: number | null; estimate: number | null }> = [];
+    for (const stmt of sortedIncomeQ) {
+      const eps = safe(stmt.eps);
+      if (eps !== 0) epsEstimates.push({ period: qLabel(stmt), actual: eps, estimate: null });
     }
 
-    // EBITDA History
-    const ebitdaHistory: Array<{ year: string; ebitda: number }> = [];
-    for (const stmt of sortedIncome) {
-      const ebitda = safe(stmt.ebitda);
-      if (ebitda !== 0) {
-        ebitdaHistory.push({ year: str(stmt.calendarYear) || str(stmt.date)?.substring(0, 4) || "", ebitda });
-      }
-    }
-
-    log.push(`Financials: ${sortedIncome.length} income stmts, ${sortedRatios.length} ratios, ${revenueHistory.length} rev pts, ${ebitdaHistory.length} ebitda pts`);
+    log.push(`Financials: ${sortedIncomeQ.length}Q income, ${sortedIncomeA.length}A income, ${sortedEV.length} EV, ${sortedRatios.length} ratios`);
 
     // Segments
     const revenueBySegment = processSegments(fmpRevSeg, SEGMENT_COLORS, industry);
     const revenueByGeography = processGeoSegments(fmpGeoSeg, SEGMENT_COLORS);
 
-    // Forward P/E - FMP -> Yahoo
+    // P/E from multiple sources
     const fmpPE = fmpRatios.length > 0 ? safe(fmpRatios[0].priceEarningsRatio) : 0;
-    const yahooPE = ynum(ySummary?.forwardPE) || ynum(ySummary?.trailingPE);
-    const latestEps = sortedIncome.length > 0 ? safe(sortedIncome[sortedIncome.length - 1].eps) : ynum(yKeyStats?.trailingEps);
+    const yahooPE = ynum(ySummary?.trailingPE) || ynum(ySummary?.forwardPE);
+    const ttmEps = trailing4Q.reduce((s, q) => s + safe(q.eps), 0);
+    const computedPE = currentPrice > 0 && ttmEps > 0 ? currentPrice / ttmEps : 0;
     const forwardPE = fmpPE > 0 ? Math.round(fmpPE * 10) / 10
       : yahooPE > 0 ? Math.round(yahooPE * 10) / 10
-      : (currentPrice > 0 && latestEps > 0) ? Math.round((currentPrice / latestEps) * 10) / 10 : 0;
+      : computedPE > 0 ? Math.round(computedPE * 10) / 10 : 0;
     const compAvgPE = forwardPE > 0 ? Math.round(forwardPE * 0.95 * 10) / 10 : 0;
 
-    // Key metrics for enrichment
-    const latestIncome = sortedIncome[sortedIncome.length - 1] || {};
-    const prevIncome = sortedIncome.length > 1 ? sortedIncome[sortedIncome.length - 2] : null;
-    const totalRev = safe(latestIncome.revenue) || ynum(yFinancial?.totalRevenue);
-    const revGrowth = prevIncome && safe(prevIncome.revenue) > 0
-      ? (totalRev - safe(prevIncome.revenue)) / safe(prevIncome.revenue)
+    // Key metrics for Claude enrichment
+    const totalRev = ttmRevenue > 0 ? ttmRevenue : ynum(yFinancial?.totalRevenue);
+    const revGrowth = revGrowthTable.length > 0 ? revGrowthTable[revGrowthTable.length - 1].growth / 100
       : ynum(yFinancial?.revenueGrowth) || undefined;
-    const profitMargin = totalRev > 0
-      ? safe(latestIncome.netIncome) / totalRev
+    const profitMargin = totalRev > 0 && ttmNetIncome !== 0 ? ttmNetIncome / totalRev
       : ynum(yFinancial?.profitMargins) || undefined;
     const roe = safe(fmpKeyMetrics[0]?.roe) || ynum(yFinancial?.returnOnEquity) || undefined;
     const debtToEquity = safe(fmpRatios[0]?.debtEquityRatio) || ynum(yFinancial?.debtToEquity) / 100 || undefined;
     const currentRatio = safe(fmpRatios[0]?.currentRatio) || ynum(yFinancial?.currentRatio) || undefined;
-    const fcf = safe(latestIncome.freeCashFlow) || ynum(yFinancial?.freeCashflow);
+    const fcf = ynum(yFinancial?.freeCashflow) || 0;
     const fcfMargin = totalRev > 0 && fcf > 0 ? fcf / totalRev : undefined;
 
     // Analyst rating
@@ -489,6 +502,9 @@ export async function GET(request: NextRequest) {
       revenueByGeography,
       forwardPE,
       compAvgPE,
+      evEbitda,
+      evRevenue,
+      revGrowthTable,
       currentPrice: Math.round(currentPrice * 100) / 100,
       priceChange: Math.round(priceChange * 100) / 100,
       priceChangePercent: Math.round(priceChangePercent * 100) / 100,

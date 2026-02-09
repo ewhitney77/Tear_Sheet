@@ -23,6 +23,9 @@ export interface StockData {
   revenueByGeography: SegmentData[];
   forwardPE: number;
   compAvgPE: number;
+  evEbitda: number;
+  evRevenue: number;
+  revGrowthTable: RevGrowthPoint[];
   currentPrice: number;
   priceChange: number;
   priceChangePercent: number;
@@ -64,6 +67,11 @@ export interface RevenuePoint {
 export interface EBITDAPoint {
   year: string;
   ebitda: number;
+}
+
+export interface RevGrowthPoint {
+  year: string;
+  growth: number;
 }
 
 export interface SegmentData {
