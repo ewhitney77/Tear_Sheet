@@ -13,42 +13,96 @@ const SEGMENT_COLORS = [
 ];
 
 // ============================================================
-// DATA FETCHING HELPERS
+// DATA FETCHING - NO CACHING (avoid stale empty responses)
 // ============================================================
 
 async function fmpFetch(endpoint: string): Promise<unknown> {
+  if (!FMP_KEY) return null;
   const sep = endpoint.includes("?") ? "&" : "?";
   const url = `${FMP_BASE}${endpoint}${sep}apikey=${FMP_KEY}`;
-  const res = await fetch(url, { next: { revalidate: 600 } });
+  const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) throw new Error(`FMP ${res.status}`);
   const data = await res.json();
-  if (data && typeof data === "object" && !Array.isArray(data)) {
-    if (data["Error Message"]) throw new Error(data["Error Message"]);
+  if (data && typeof data === "object" && !Array.isArray(data) && data["Error Message"]) {
+    throw new Error(data["Error Message"]);
   }
   return data;
 }
 
-/** Yahoo Finance v8 chart - works from server without auth */
-async function yahooChart(ticker: string): Promise<Record<string, unknown> | null> {
+// Yahoo Finance cookie/crumb auth for quoteSummary (full financial data)
+let yahooCrumb: string | null = null;
+let yahooCookie: string | null = null;
+
+async function getYahooCrumb(): Promise<{ crumb: string; cookie: string } | null> {
+  if (yahooCrumb && yahooCookie) return { crumb: yahooCrumb, cookie: yahooCookie };
   try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=5y&interval=1wk&includePrePost=false`;
-    const res = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0" },
-      next: { revalidate: 600 },
+    // Step 1: Get cookie from consent page
+    const cookieRes = await fetch("https://fc.yahoo.com", {
+      redirect: "manual",
+      cache: "no-store",
     });
-    if (!res.ok) return null;
-    const json = await res.json();
-    return json?.chart?.result?.[0] || null;
-  } catch { return null; }
+    const setCookies = cookieRes.headers.getSetCookie?.() || [];
+    const cookie = setCookies.map(c => c.split(";")[0]).join("; ") || "";
+
+    if (!cookie) {
+      // Try alternative: direct consent
+      const altRes = await fetch("https://login.yahoo.com/", {
+        redirect: "manual",
+        cache: "no-store",
+      });
+      const altCookies = altRes.headers.getSetCookie?.() || [];
+      const altCookie = altCookies.map(c => c.split(";")[0]).join("; ");
+      if (!altCookie) return null;
+    }
+
+    const finalCookie = cookie || "A=1";
+
+    // Step 2: Get crumb
+    const crumbRes = await fetch("https://query2.finance.yahoo.com/v1/test/getcrumb", {
+      headers: { Cookie: finalCookie, "User-Agent": "Mozilla/5.0" },
+      cache: "no-store",
+    });
+    if (!crumbRes.ok) return null;
+    const crumb = await crumbRes.text();
+    if (!crumb || crumb.includes("<")) return null;
+
+    yahooCrumb = crumb;
+    yahooCookie = finalCookie;
+    return { crumb, cookie: finalCookie };
+  } catch (e) {
+    console.error("Yahoo crumb error:", e);
+    return null;
+  }
 }
 
-/** Yahoo Finance v8 chart daily for recent price data */
-async function yahooChartDaily(ticker: string): Promise<Record<string, unknown> | null> {
+async function yahooQuoteSummary(ticker: string): Promise<Record<string, unknown> | null> {
   try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=5y&interval=1d&includePrePost=false`;
+    const auth = await getYahooCrumb();
+    if (auth) {
+      const modules = "price,summaryDetail,defaultKeyStatistics,financialData,earningsTrend,assetProfile";
+      const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=${modules}&crumb=${encodeURIComponent(auth.crumb)}`;
+      const res = await fetch(url, {
+        headers: { Cookie: auth.cookie, "User-Agent": "Mozilla/5.0" },
+        cache: "no-store",
+      });
+      if (res.ok) {
+        const data = await res.json();
+        return data?.quoteSummary?.result?.[0] || null;
+      }
+    }
+  } catch (e) {
+    console.error("Yahoo quoteSummary error:", e);
+  }
+  return null;
+}
+
+/** Yahoo Finance v8 chart - works from server without auth, gives price history + basic meta */
+async function yahooChart(ticker: string, interval = "1wk"): Promise<Record<string, unknown> | null> {
+  try {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?range=5y&interval=${interval}&includePrePost=false`;
     const res = await fetch(url, {
       headers: { "User-Agent": "Mozilla/5.0" },
-      next: { revalidate: 600 },
+      cache: "no-store",
     });
     if (!res.ok) return null;
     const json = await res.json();
@@ -62,7 +116,17 @@ function safe(v: any, fb: number = 0): number {
   return isFinite(n) ? n : fb;
 }
 
-function getResult(s: PromiseSettledResult<unknown>): unknown {
+// Yahoo stores numbers as { raw: number, fmt: string }
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function ynum(v: any): number {
+  if (v == null) return 0;
+  if (typeof v === "number") return isFinite(v) ? v : 0;
+  if (typeof v === "object" && v.raw != null) return isFinite(v.raw) ? v.raw : 0;
+  return safe(v);
+}
+
+function getResult(s: PromiseSettledResult<unknown> | undefined): unknown {
+  if (!s) return null;
   return s.status === "fulfilled" ? s.value : null;
 }
 
@@ -70,57 +134,31 @@ function arr(v: unknown): unknown[] {
   return Array.isArray(v) ? v : [];
 }
 
+function str(v: unknown): string {
+  return typeof v === "string" ? v : "";
+}
+
 function formatMcap(cap: number): string {
   if (cap >= 1e12) return `$${(cap / 1e12).toFixed(1)}T`;
   if (cap >= 1e9) return `$${(cap / 1e9).toFixed(1)}B`;
   if (cap >= 1e6) return `$${(cap / 1e6).toFixed(0)}M`;
-  return `$${cap.toLocaleString()}`;
+  return cap > 0 ? `$${cap.toLocaleString()}` : "N/A";
 }
 
 // ============================================================
 // CLAUDE API - cost-conscious enrichment
 // ============================================================
 async function claudeEnrich(
-  ticker: string,
-  companyName: string,
-  sector: string,
-  industry: string,
-  marketCapStr: string,
-  metrics: {
-    revenue?: number;
-    revenueGrowth?: number;
-    netIncome?: number;
-    profitMargin?: number;
-    eps?: number;
-    pe?: number;
-    beta?: number;
-    debtToEquity?: number;
-    currentRatio?: number;
-    divYield?: number;
-    fcfMargin?: number;
-    roe?: number;
-  }
+  ticker: string, companyName: string, sector: string, industry: string,
+  marketCapStr: string, metrics: Record<string, unknown>
 ): Promise<{ description: string; thesis: { title: string; description: string }[]; risks: { title: string; description: string }[] } | null> {
   if (!ANTHROPIC_KEY) return null;
   try {
-    // Build a minimal prompt with key data
-    const m = metrics;
+    const pairs = Object.entries(metrics).filter(([, v]) => v != null && v !== 0 && v !== undefined);
     const dataStr = [
-      `Ticker: ${ticker}`,
-      `Company: ${companyName}`,
-      `Sector: ${sector}, Industry: ${industry}`,
-      `Market Cap: ${marketCapStr}`,
-      m.revenue ? `Revenue: $${(m.revenue / 1e9).toFixed(2)}B` : null,
-      m.revenueGrowth != null ? `Rev Growth: ${(m.revenueGrowth * 100).toFixed(1)}%` : null,
-      m.profitMargin != null ? `Net Margin: ${(m.profitMargin * 100).toFixed(1)}%` : null,
-      m.eps ? `EPS: $${m.eps.toFixed(2)}` : null,
-      m.pe ? `P/E: ${m.pe.toFixed(1)}x` : null,
-      m.beta ? `Beta: ${m.beta.toFixed(2)}` : null,
-      m.debtToEquity ? `D/E: ${m.debtToEquity.toFixed(2)}` : null,
-      m.divYield ? `Div Yield: ${m.divYield.toFixed(1)}%` : null,
-      m.fcfMargin ? `FCF Margin: ${(m.fcfMargin * 100).toFixed(1)}%` : null,
-      m.roe ? `ROE: ${(m.roe * 100).toFixed(1)}%` : null,
-    ].filter(Boolean).join(", ");
+      `${ticker} (${companyName}), ${sector}/${industry}, MCap ${marketCapStr}`,
+      ...pairs.map(([k, v]) => `${k}: ${typeof v === "number" ? (Math.abs(v) < 1 ? (v * 100).toFixed(1) + "%" : v.toFixed(2)) : v}`),
+    ].join(", ");
 
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -134,36 +172,20 @@ async function claudeEnrich(
         max_tokens: 800,
         messages: [{
           role: "user",
-          content: `You are a senior equity research analyst. Given this data for ${ticker}:
-${dataStr}
+          content: `Senior equity analyst. Data: ${dataStr}
 
-Return JSON only (no markdown):
-{"description":"2-3 sentence company description for an equity research report","thesis":[{"title":"short title","description":"1-2 sentences"}],"risks":[{"title":"short title","description":"1-2 sentences"}]}
+Return JSON only: {"description":"2-3 sentence company description - what they do, products, market position","thesis":[{"title":"short","description":"1-2 sentences with metrics"}],"risks":[{"title":"short","description":"1-2 sentences"}]}
 
-Rules:
-- description: What the company does, key products/services, market position. Be specific and factual.
-- thesis: 2-3 investment thesis points based on the financial data. Reference actual metrics.
-- risks: 2-3 risk points. Reference actual metrics where relevant.
-- Be concise. No fluff. Professional tone matching institutional equity research.`
+2-3 thesis points, 2-3 risks. Be specific, reference metrics. Institutional tone.`
         }],
       }),
     });
-
-    if (!res.ok) {
-      console.error("Claude API error:", res.status, await res.text().catch(() => ""));
-      return null;
-    }
-
+    if (!res.ok) { console.error("Claude:", res.status); return null; }
     const data = await res.json();
     const text = data?.content?.[0]?.text || "";
-    // Extract JSON from response
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return null;
-    return JSON.parse(jsonMatch[0]);
-  } catch (e) {
-    console.error("Claude enrichment error:", e);
-    return null;
-  }
+    const m = text.match(/\{[\s\S]*\}/);
+    return m ? JSON.parse(m[0]) : null;
+  } catch (e) { console.error("Claude error:", e); return null; }
 }
 
 // ============================================================
@@ -171,36 +193,47 @@ Rules:
 // ============================================================
 export async function GET(request: NextRequest) {
   const ticker = request.nextUrl.searchParams.get("ticker")?.toUpperCase();
-  if (!ticker) {
-    return NextResponse.json({ error: "Ticker is required" }, { status: 400 });
-  }
+  if (!ticker) return NextResponse.json({ error: "Ticker required" }, { status: 400 });
+
+  const log: string[] = [];
+  const t0 = Date.now();
 
   try {
-    // ---- PHASE 1: Fetch data from all sources in parallel ----
+    // ====== PHASE 1: Fetch all data sources in parallel ======
     const fmpPromises = FMP_KEY ? [
-      fmpFetch(`/profile/${ticker}`),                                              // 0
-      fmpFetch(`/income-statement/${ticker}?limit=6`),                             // 1
-      fmpFetch(`/ratios/${ticker}?limit=40`),                                      // 2
-      fmpFetch(`/key-metrics/${ticker}?limit=6`),                                  // 3
-      fmpFetch(`/historical-price-full/${ticker}?serietype=line`),                 // 4
-      fmpFetch(`/analyst-estimates/${ticker}?limit=12`),                           // 5
-      fmpFetch(`/rating/${ticker}`),                                               // 6
-      fmpFetch(`/revenue-product-segmentation?symbol=${ticker}&structure=flat&period=annual`),  // 7
-      fmpFetch(`/revenue-geographic-segmentation?symbol=${ticker}&structure=flat&period=annual`), // 8
+      fmpFetch(`/profile/${ticker}`),
+      fmpFetch(`/income-statement/${ticker}?limit=6`),
+      fmpFetch(`/ratios/${ticker}?limit=40`),
+      fmpFetch(`/key-metrics/${ticker}?limit=6`),
+      fmpFetch(`/historical-price-full/${ticker}?serietype=line`),
+      fmpFetch(`/analyst-estimates/${ticker}?limit=12`),
+      fmpFetch(`/rating/${ticker}`),
+      fmpFetch(`/revenue-product-segmentation?symbol=${ticker}&structure=flat&period=annual`),
+      fmpFetch(`/revenue-geographic-segmentation?symbol=${ticker}&structure=flat&period=annual`),
     ] : [];
 
-    // Always fetch Yahoo as backup (costs nothing, no API key needed)
-    const yahooPromise = yahooChartDaily(ticker);
-    const yahooWeeklyPromise = yahooChart(ticker);
-
-    const [fmpResults, yahooDaily, yahooWeekly] = await Promise.all([
-      FMP_KEY ? Promise.allSettled(fmpPromises) : Promise.resolve([]),
-      yahooPromise,
-      yahooWeeklyPromise,
+    const [fmpSettled, yahooSummary, yahooChartWeekly] = await Promise.all([
+      fmpPromises.length > 0 ? Promise.allSettled(fmpPromises) : Promise.resolve([]),
+      yahooQuoteSummary(ticker),
+      yahooChart(ticker, "1wk"),
     ]);
 
-    // ---- PHASE 2: Extract FMP data ----
-    const fmp = fmpResults as PromiseSettledResult<unknown>[];
+    const fmp = fmpSettled as PromiseSettledResult<unknown>[];
+
+    // Log what succeeded/failed
+    const fmpNames = ["profile", "income", "ratios", "keyMetrics", "price", "estimates", "rating", "revSeg", "geoSeg"];
+    fmp.forEach((r, i) => {
+      if (r.status === "rejected") log.push(`FMP ${fmpNames[i]}: FAILED (${r.reason?.message || "unknown"})`);
+      else {
+        const v = r.value;
+        const isEmpty = Array.isArray(v) ? v.length === 0 : !v;
+        log.push(`FMP ${fmpNames[i]}: ${isEmpty ? "EMPTY" : "OK"}`);
+      }
+    });
+    log.push(`Yahoo quoteSummary: ${yahooSummary ? "OK" : "FAILED"}`);
+    log.push(`Yahoo chart: ${yahooChartWeekly ? "OK" : "FAILED"}`);
+
+    // ====== PHASE 2: Extract raw data ======
     const fmpProfile = arr(getResult(fmp[0]))[0] as Record<string, unknown> | undefined;
     const fmpIncome = arr(getResult(fmp[1])) as Record<string, unknown>[];
     const fmpRatios = arr(getResult(fmp[2])) as Record<string, unknown>[];
@@ -211,85 +244,71 @@ export async function GET(request: NextRequest) {
     const fmpRevSeg = getResult(fmp[7]);
     const fmpGeoSeg = getResult(fmp[8]);
 
-    // ---- PHASE 3: Extract Yahoo data ----
-    const yahooData = yahooDaily || yahooWeekly;
-    const yahooMeta = (yahooData?.meta || {}) as Record<string, unknown>;
+    // Yahoo modules
+    const yPrice = (yahooSummary?.price || {}) as Record<string, unknown>;
+    const ySummary = (yahooSummary?.summaryDetail || {}) as Record<string, unknown>;
+    const yKeyStats = (yahooSummary?.defaultKeyStatistics || {}) as Record<string, unknown>;
+    const yFinancial = (yahooSummary?.financialData || {}) as Record<string, unknown>;
+    const yAsset = (yahooSummary?.assetProfile || {}) as Record<string, unknown>;
+    const yEarnings = (yahooSummary?.earningsTrend || {}) as Record<string, unknown>;
+    const yahooMeta = (yahooChartWeekly?.meta || {}) as Record<string, unknown>;
 
-    // ---- PHASE 4: Build unified profile (FMP primary, Yahoo fallback) ----
-    const companyName = str(fmpProfile?.companyName) || str(yahooMeta?.longName) || str(yahooMeta?.shortName) || ticker;
-    const sector = str(fmpProfile?.sector) || "Technology";
-    const industry = str(fmpProfile?.industry) || "Software";
-    const beta = safe(fmpProfile?.beta) || safe(yahooMeta?.beta) || 1;
-
-    // Market cap: FMP -> Yahoo -> compute from price * shares
-    let marketCap = safe(fmpProfile?.mktCap);
-    if (marketCap <= 0) {
-      // Yahoo meta doesn't have market cap directly, but we can use chartPreviousClose * volume approximation
-      // or just use a reasonable calculation
-      const yahooPrice = safe(yahooMeta?.regularMarketPrice) || safe(yahooMeta?.chartPreviousClose);
-      // Try to get from FMP key metrics
-      if (fmpKeyMetrics.length > 0) {
-        marketCap = safe(fmpKeyMetrics[0]?.marketCap);
-      }
-      // If still 0, try FMP enterprise value as approximation
-      if (marketCap <= 0 && fmpKeyMetrics.length > 0) {
-        marketCap = safe(fmpKeyMetrics[0]?.enterpriseValue);
-      }
-      // Last resort: try to compute from shares outstanding in income statements
-      if (marketCap <= 0 && yahooPrice > 0 && fmpIncome.length > 0) {
-        const shares = safe(fmpIncome[0]?.weightedAverageShsOut);
-        if (shares > 0) marketCap = yahooPrice * shares;
-      }
+    // Validate we have ANY data at all
+    if (!fmpProfile && !yahooSummary && !yahooChartWeekly) {
+      console.error(`[${ticker}] All data sources failed:`, log.join("; "));
+      return NextResponse.json(
+        { error: `Could not find data for ${ticker}. All data sources failed. Check Vercel logs for details.` },
+        { status: 404 }
+      );
     }
 
-    const currentPrice = safe(fmpProfile?.price) || safe(yahooMeta?.regularMarketPrice) || safe(yahooMeta?.chartPreviousClose);
-    const previousClose = safe(fmpProfile?.previousClose) || safe(yahooMeta?.chartPreviousClose) || currentPrice;
+    // ====== PHASE 3: Build unified company profile ======
+    const companyName = str(fmpProfile?.companyName) || str(yPrice?.longName) || str(yPrice?.shortName) || str(yahooMeta?.longName) || ticker;
+    const sector = str(fmpProfile?.sector) || str(yAsset?.sector) || "Technology";
+    const industry = str(fmpProfile?.industry) || str(yAsset?.industry) || "Software";
+    const beta = safe(fmpProfile?.beta) || ynum(ySummary?.beta) || 1;
+    const currentPrice = safe(fmpProfile?.price) || ynum(yFinancial?.currentPrice) || ynum(yPrice?.regularMarketPrice) || safe(yahooMeta?.regularMarketPrice);
+    const previousClose = safe(fmpProfile?.previousClose) || ynum(yPrice?.regularMarketPreviousClose) || safe(yahooMeta?.chartPreviousClose) || currentPrice;
     const priceChange = safe(fmpProfile?.changes) || (currentPrice - previousClose);
     const priceChangePercent = previousClose > 0 ? (priceChange / previousClose) * 100 : 0;
-    const lastDiv = safe(fmpProfile?.lastDiv);
-    const divYieldPct = lastDiv > 0 && currentPrice > 0 ? (lastDiv / currentPrice) * 100 : 0;
 
-    // Validate we have SOMETHING usable
-    if (!fmpProfile && !yahooData) {
-      return NextResponse.json(
-        { error: `Could not find data for ticker: ${ticker}. Please verify the symbol is a valid US-listed stock.` },
-        { status: 404 }
-      );
+    // Market cap with multiple fallback sources
+    let marketCap = safe(fmpProfile?.mktCap);
+    if (marketCap <= 0) marketCap = ynum(yPrice?.marketCap);
+    if (marketCap <= 0) marketCap = safe(fmpKeyMetrics[0]?.marketCap);
+    if (marketCap <= 0) marketCap = safe(fmpKeyMetrics[0]?.enterpriseValue);
+    if (marketCap <= 0 && currentPrice > 0) {
+      const shares = ynum(yKeyStats?.sharesOutstanding) || safe(fmpIncome[0]?.weightedAverageShsOut);
+      if (shares > 0) marketCap = currentPrice * shares;
     }
+    log.push(`Market cap resolved: ${formatMcap(marketCap)} (${marketCap})`);
 
-    // If we have no price at all, something is very wrong
-    if (currentPrice <= 0 && (!fmpPriceData?.historical?.length) && !yahooData) {
-      return NextResponse.json(
-        { error: `No market data available for ${ticker}. This ticker may not be actively traded.` },
-        { status: 404 }
-      );
-    }
+    // Dividend
+    const lastDiv = safe(fmpProfile?.lastDiv) || ynum(ySummary?.dividendRate);
+    const divYieldPct = lastDiv > 0 && currentPrice > 0 ? (lastDiv / currentPrice) * 100 : ynum(ySummary?.dividendYield) * 100;
 
-    // ---- PHASE 5: Build price history ----
+    // ====== PHASE 4: Price history ======
     const priceHistoryArr: Array<{ date: string; close: number; volume: number }> = [];
+    const fmpHist = fmpPriceData?.historical || [];
 
-    // Prefer FMP price data (more complete), fall back to Yahoo
-    const fmpHistoricals = fmpPriceData?.historical || [];
-    if (fmpHistoricals.length > 50) {
-      const sorted = [...fmpHistoricals].reverse();
+    if (fmpHist.length > 50) {
+      const sorted = [...fmpHist].reverse();
       const step = Math.max(1, Math.floor(sorted.length / 260));
       for (let i = 0; i < sorted.length; i += step) {
         const p = sorted[i];
         priceHistoryArr.push({ date: p.date, close: Math.round(p.close * 100) / 100, volume: p.volume || 0 });
       }
       const last = sorted[sorted.length - 1];
-      if (priceHistoryArr[priceHistoryArr.length - 1]?.date !== last.date) {
+      if (priceHistoryArr.length > 0 && priceHistoryArr[priceHistoryArr.length - 1]?.date !== last.date) {
         priceHistoryArr.push({ date: last.date, close: Math.round(last.close * 100) / 100, volume: last.volume || 0 });
       }
-    } else if (yahooData) {
-      // Use Yahoo chart data
-      const timestamps = (yahooData.timestamp as number[]) || [];
-      const indicators = yahooData.indicators as { quote?: Array<{ close?: number[]; volume?: number[] }> };
+      log.push(`Price history: FMP (${priceHistoryArr.length} pts)`);
+    } else if (yahooChartWeekly) {
+      const timestamps = (yahooChartWeekly.timestamp as number[]) || [];
+      const indicators = yahooChartWeekly.indicators as { quote?: Array<{ close?: number[]; volume?: number[] }> };
       const closes = indicators?.quote?.[0]?.close || [];
       const volumes = indicators?.quote?.[0]?.volume || [];
-      // Sample down to ~260 points for weekly-ish data
-      const step = Math.max(1, Math.floor(timestamps.length / 260));
-      for (let i = 0; i < timestamps.length; i += step) {
+      for (let i = 0; i < timestamps.length; i++) {
         const c = closes[i];
         if (c != null && isFinite(c)) {
           priceHistoryArr.push({
@@ -299,26 +318,44 @@ export async function GET(request: NextRequest) {
           });
         }
       }
+      log.push(`Price history: Yahoo (${priceHistoryArr.length} pts)`);
     }
 
-    // ---- PHASE 6: Build financial data from FMP ----
-    const sortedIncome = [...fmpIncome].reverse(); // chronological
+    // ====== PHASE 5: Financial data (FMP primary, Yahoo fallback for key metrics) ======
+    const sortedIncome = [...fmpIncome].reverse();
     const sortedRatios = [...fmpRatios].reverse();
 
     // EPS estimates
     const epsEstimates: Array<{ period: string; actual: number | null; estimate: number | null }> = [];
-    for (const stmt of sortedIncome) {
-      epsEstimates.push({
-        period: str(stmt.calendarYear) || str(stmt.date)?.substring(0, 4) || "",
-        actual: stmt.eps != null ? safe(stmt.eps) : null,
-        estimate: null,
-      });
+    if (sortedIncome.length > 0) {
+      for (const stmt of sortedIncome) {
+        epsEstimates.push({
+          period: str(stmt.calendarYear) || str(stmt.date)?.substring(0, 4) || "",
+          actual: stmt.eps != null ? safe(stmt.eps) : null,
+          estimate: null,
+        });
+      }
     }
+    // Yahoo earnings trend for estimates
+    const yTrend = arr((yEarnings as Record<string, unknown>)?.trend) as Record<string, unknown>[];
+    for (const t of yTrend) {
+      const period = str(t.period);
+      if (period && (period.includes("y") || period === "0q")) {
+        const est = ynum((t.earningsEstimate as Record<string, unknown>)?.avg);
+        if (est !== 0) {
+          const year = str(t.endDate)?.substring(0, 4) || period;
+          const existing = epsEstimates.find(e => e.period === year);
+          if (existing) existing.estimate = est;
+          else epsEstimates.push({ period: year, actual: null, estimate: est });
+        }
+      }
+    }
+    // Also add from FMP estimates
     for (const est of fmpEstimates.filter(e => new Date(str(e.date)) > new Date()).reverse().slice(0, 3)) {
       const year = str(est.date)?.substring(0, 4) || "";
       const existing = epsEstimates.find(e => e.period === year);
-      if (existing) existing.estimate = safe(est.estimatedEpsAvg);
-      else epsEstimates.push({ period: year, actual: null, estimate: safe(est.estimatedEpsAvg) });
+      if (existing && !existing.estimate) existing.estimate = safe(est.estimatedEpsAvg);
+      else if (!existing) epsEstimates.push({ period: year, actual: null, estimate: safe(est.estimatedEpsAvg) });
     }
 
     // P/E History
@@ -356,75 +393,76 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Revenue segments
+    log.push(`Financials: ${sortedIncome.length} income stmts, ${sortedRatios.length} ratios, ${revenueHistory.length} rev pts, ${ebitdaHistory.length} ebitda pts`);
+
+    // Segments
     const revenueBySegment = processSegments(fmpRevSeg, SEGMENT_COLORS, industry);
     const revenueByGeography = processGeoSegments(fmpGeoSeg, SEGMENT_COLORS);
 
-    // Forward P/E
-    const latestEps = sortedIncome.length > 0 ? safe(sortedIncome[sortedIncome.length - 1].eps) : 0;
-    const latestRatioPE = fmpRatios.length > 0 ? safe(fmpRatios[0].priceEarningsRatio) : 0;
-    const forwardPE = latestRatioPE > 0 ? Math.round(latestRatioPE * 10) / 10
+    // Forward P/E - FMP -> Yahoo
+    const fmpPE = fmpRatios.length > 0 ? safe(fmpRatios[0].priceEarningsRatio) : 0;
+    const yahooPE = ynum(ySummary?.forwardPE) || ynum(ySummary?.trailingPE);
+    const latestEps = sortedIncome.length > 0 ? safe(sortedIncome[sortedIncome.length - 1].eps) : ynum(yKeyStats?.trailingEps);
+    const forwardPE = fmpPE > 0 ? Math.round(fmpPE * 10) / 10
+      : yahooPE > 0 ? Math.round(yahooPE * 10) / 10
       : (currentPrice > 0 && latestEps > 0) ? Math.round((currentPrice / latestEps) * 10) / 10 : 0;
     const compAvgPE = forwardPE > 0 ? Math.round(forwardPE * 0.95 * 10) / 10 : 0;
 
     // Key metrics for enrichment
     const latestIncome = sortedIncome[sortedIncome.length - 1] || {};
     const prevIncome = sortedIncome.length > 1 ? sortedIncome[sortedIncome.length - 2] : null;
-    const totalRev = safe(latestIncome.revenue);
+    const totalRev = safe(latestIncome.revenue) || ynum(yFinancial?.totalRevenue);
     const revGrowth = prevIncome && safe(prevIncome.revenue) > 0
-      ? (totalRev - safe(prevIncome.revenue)) / safe(prevIncome.revenue) : undefined;
-    const profitMargin = totalRev > 0 ? safe(latestIncome.netIncome) / totalRev : undefined;
-    const roe = safe(fmpKeyMetrics[0]?.roe) || undefined;
-    const fcf = safe(latestIncome.freeCashFlow) || safe(fmpKeyMetrics[0]?.freeCashFlowPerShare) * (marketCap > 0 && currentPrice > 0 ? marketCap / currentPrice : 0);
+      ? (totalRev - safe(prevIncome.revenue)) / safe(prevIncome.revenue)
+      : ynum(yFinancial?.revenueGrowth) || undefined;
+    const profitMargin = totalRev > 0
+      ? safe(latestIncome.netIncome) / totalRev
+      : ynum(yFinancial?.profitMargins) || undefined;
+    const roe = safe(fmpKeyMetrics[0]?.roe) || ynum(yFinancial?.returnOnEquity) || undefined;
+    const debtToEquity = safe(fmpRatios[0]?.debtEquityRatio) || ynum(yFinancial?.debtToEquity) / 100 || undefined;
+    const currentRatio = safe(fmpRatios[0]?.currentRatio) || ynum(yFinancial?.currentRatio) || undefined;
+    const fcf = safe(latestIncome.freeCashFlow) || ynum(yFinancial?.freeCashflow);
     const fcfMargin = totalRev > 0 && fcf > 0 ? fcf / totalRev : undefined;
-    const debtToEquity = safe(fmpRatios[0]?.debtEquityRatio) || undefined;
-    const currentRatio = safe(fmpRatios[0]?.currentRatio) || undefined;
 
     // Analyst rating
-    const analystRating = fmpRating?.ratingRecommendation
-      ? getAnalystRating(str(fmpRating.ratingRecommendation)) : "Buy";
+    const recKey = ynum(yFinancial?.recommendationMean);
+    const fmpRecStr = fmpRating ? str(fmpRating.ratingRecommendation) : "";
+    const analystRating = fmpRecStr ? getAnalystRating(fmpRecStr)
+      : recKey > 0 && recKey <= 1.5 ? "Strong Buy"
+      : recKey <= 2.5 ? "Buy"
+      : recKey <= 3.5 ? "Hold"
+      : "Sell";
+
     const riskRating = getRiskRating(beta);
-
-    // Dividend growth
     const divGrowthEst = computeDivGrowth(fmpKeyMetrics);
-    const shortRatio = safe(fmpKeyMetrics[0]?.shortTermCoverageRatios);
+    const shortRatio = safe(fmpKeyMetrics[0]?.shortTermCoverageRatios) || ynum(yKeyStats?.shortRatio);
 
-    // ---- PHASE 7: Claude AI enrichment (parallel with nothing - it's the last async step) ----
+    // ====== PHASE 6: Claude AI enrichment ======
     const marketCapStr = formatMcap(marketCap);
     const enrichment = await claudeEnrich(ticker, companyName, sector, industry, marketCapStr, {
-      revenue: totalRev || undefined,
+      revenue: totalRev > 0 ? totalRev : undefined,
       revenueGrowth: revGrowth,
-      netIncome: safe(latestIncome.netIncome) || undefined,
       profitMargin,
       eps: latestEps || undefined,
       pe: forwardPE || undefined,
-      beta,
+      beta: beta !== 1 ? beta : undefined,
       debtToEquity,
-      currentRatio,
-      divYield: divYieldPct || undefined,
+      divYield: divYieldPct > 0 ? divYieldPct / 100 : undefined,
       fcfMargin,
       roe,
     });
+    log.push(`Claude enrichment: ${enrichment ? "OK" : "FAILED/SKIPPED"}`);
 
-    // Use Claude enrichment or fallbacks
     const description = enrichment?.description || buildFallbackDescription(companyName, sector, industry);
     const thesis = enrichment?.thesis?.length ? enrichment.thesis : buildFallbackThesis(companyName, revGrowth, profitMargin, sector, industry);
     const risks = enrichment?.risks?.length ? enrichment.risks : buildFallbackRisks(companyName, beta, debtToEquity, sector, industry);
 
-    // ---- PHASE 8: Build response ----
-    const today = new Date().toISOString().split("T")[0];
-    const citations = [
-      { source: "Financial Modeling Prep", url: `https://financialmodelingprep.com/financial-statements/${ticker}`, description: `${companyName} financial statements and key metrics`, accessDate: today },
-      { source: "Yahoo Finance", url: `https://finance.yahoo.com/quote/${ticker}`, description: `${companyName} stock quote and market data`, accessDate: today },
-      { source: "SEC EDGAR", url: `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&company=${ticker}&type=10-K`, description: `${companyName} SEC filings including 10-K annual reports`, accessDate: today },
-      { source: "U.S. Securities and Exchange Commission", url: "https://www.sec.gov/", description: "Regulatory filings and company disclosures", accessDate: today },
-      { source: "Federal Reserve Economic Data (FRED)", url: "https://fred.stlouisfed.org/", description: "Economic indicators and interest rate data", accessDate: today },
-      { source: "S&P Global Market Intelligence", url: "https://www.spglobal.com/marketintelligence/", description: "Industry analysis and market research", accessDate: today },
-      { source: "Bloomberg L.P.", url: "https://www.bloomberg.com/", description: "Financial data and market analytics", accessDate: today },
-      { source: "Morningstar", url: `https://www.morningstar.com/stocks/xnys/${ticker.toLowerCase()}/quote`, description: `${companyName} valuation and fundamental analysis`, accessDate: today },
-      { source: "FactSet Research Systems", url: "https://www.factset.com/", description: "Consensus estimates and financial data analytics", accessDate: today },
-    ];
+    // ====== PHASE 7: Final response ======
+    const elapsed = Date.now() - t0;
+    log.push(`Total: ${elapsed}ms`);
+    console.log(`[${ticker}] ${log.join(" | ")}`);
 
+    const today = new Date().toISOString().split("T")[0];
     return NextResponse.json({
       companyName,
       ticker,
@@ -458,10 +496,18 @@ export async function GET(request: NextRequest) {
       analystName: "Michael Whitney, CFA",
       firmName: "Waverly Advisors",
       telephone: "857-254-5476",
-      citations,
+      citations: [
+        { source: "Financial Modeling Prep", url: `https://financialmodelingprep.com/financial-statements/${ticker}`, description: `${companyName} financial statements`, accessDate: today },
+        { source: "Yahoo Finance", url: `https://finance.yahoo.com/quote/${ticker}`, description: `${companyName} stock quote and market data`, accessDate: today },
+        { source: "SEC EDGAR", url: `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&company=${ticker}&type=10-K`, description: `${companyName} SEC filings`, accessDate: today },
+        { source: "S&P Global Market Intelligence", url: "https://www.spglobal.com/marketintelligence/", description: "Industry analysis and market research", accessDate: today },
+        { source: "Bloomberg L.P.", url: "https://www.bloomberg.com/", description: "Financial data and analytics", accessDate: today },
+        { source: "FactSet Research Systems", url: "https://www.factset.com/", description: "Consensus estimates and analytics", accessDate: today },
+      ],
+      _debug: { log, elapsed },
     });
   } catch (error) {
-    console.error("Stock API error:", error);
+    console.error(`[${ticker}] FATAL:`, error, "Log:", log.join(" | "));
     return NextResponse.json(
       { error: `Failed to fetch data for ${ticker}: ${error instanceof Error ? error.message : "Unknown error"}` },
       { status: 500 }
@@ -473,120 +519,69 @@ export async function GET(request: NextRequest) {
 // HELPERS
 // ============================================================
 
-function str(v: unknown): string {
-  return typeof v === "string" ? v : "";
-}
-
-function getRiskRating(beta: number): string {
-  if (beta < 0.8) return "Low";
-  if (beta < 1.2) return "Medium";
-  return "High";
-}
-
+function getRiskRating(b: number): string { return b < 0.8 ? "Low" : b < 1.2 ? "Medium" : "High"; }
 function getAnalystRating(r: string): string {
-  const low = r.toLowerCase();
-  if (low.includes("strong buy")) return "Strong Buy";
-  if (low.includes("buy")) return "Buy";
-  if (low.includes("sell")) return "Sell";
-  return "Buy";
+  const l = r.toLowerCase();
+  return l.includes("strong buy") ? "Strong Buy" : l.includes("buy") ? "Buy" : l.includes("sell") ? "Sell" : "Hold";
 }
 
 function computeDivGrowth(km: Record<string, unknown>[]): number {
   if (km.length < 2) return 0;
-  const recent = safe(km[0]?.dividendYield);
-  const older = safe(km[km.length - 1]?.dividendYield);
+  const recent = safe(km[0]?.dividendYield), older = safe(km[km.length - 1]?.dividendYield);
   if (older <= 0) return 0;
-  const cagr = (Math.pow(recent / older, 1 / (km.length - 1)) - 1) * 100;
-  return Math.abs(cagr) > 50 ? 5.0 : Math.round(cagr * 10) / 10;
+  const c = (Math.pow(recent / older, 1 / (km.length - 1)) - 1) * 100;
+  return Math.abs(c) > 50 ? 5.0 : Math.round(c * 10) / 10;
 }
 
 function processSegments(raw: unknown, colors: string[], fallbackIndustry: string): Array<{ name: string; value: number; color: string }> {
-  const fallback = [
-    { name: fallbackIndustry || "Core Business", value: 70, color: colors[0] },
-    { name: "Services", value: 18, color: colors[2] },
-    { name: "Other", value: 12, color: colors[4] },
-  ];
+  const fb = [{ name: fallbackIndustry || "Core", value: 70, color: colors[0] }, { name: "Services", value: 18, color: colors[2] }, { name: "Other", value: 12, color: colors[4] }];
   try {
     const a = raw as Array<Record<string, unknown>>;
-    if (!a || a.length === 0) return fallback;
+    if (!a?.length) return fb;
     const latest = a[a.length - 1] || a[0];
     const segs: Array<{ name: string; value: number }> = [];
     let total = 0;
-    for (const [key, val] of Object.entries(latest)) {
-      if (typeof val === "number" && val > 0) { total += val; segs.push({ name: key, value: val }); }
-      else if (typeof val === "object" && val !== null) {
-        const v = Object.values(val as Record<string, number>)[0];
-        if (typeof v === "number" && v > 0) { total += v; segs.push({ name: key, value: v }); }
-      }
+    for (const [k, v] of Object.entries(latest)) {
+      if (typeof v === "number" && v > 0) { total += v; segs.push({ name: k, value: v }); }
+      else if (typeof v === "object" && v) { const n = Object.values(v as Record<string, number>)[0]; if (typeof n === "number" && n > 0) { total += n; segs.push({ name: k, value: n }); } }
     }
-    if (segs.length === 0 || total <= 0) return fallback;
+    if (!segs.length || total <= 0) return fb;
     segs.sort((a, b) => b.value - a.value);
-    return segs.slice(0, 6).map((s, i) => ({
-      name: s.name.length > 25 ? s.name.substring(0, 22) + "..." : s.name,
-      value: Math.round((s.value / total) * 100),
-      color: colors[i % colors.length],
-    }));
-  } catch { return fallback; }
+    return segs.slice(0, 6).map((s, i) => ({ name: s.name.length > 25 ? s.name.substring(0, 22) + "..." : s.name, value: Math.round((s.value / total) * 100), color: colors[i % colors.length] }));
+  } catch { return fb; }
 }
 
 function processGeoSegments(raw: unknown, colors: string[]): Array<{ name: string; value: number; color: string }> {
-  const fallback = [
-    { name: "Americas", value: 55, color: colors[0] },
-    { name: "Europe", value: 25, color: colors[2] },
-    { name: "Asia Pacific", value: 15, color: colors[4] },
-    { name: "Other", value: 5, color: colors[6] },
-  ];
+  const fb = [{ name: "Americas", value: 55, color: colors[0] }, { name: "Europe", value: 25, color: colors[2] }, { name: "Asia Pacific", value: 15, color: colors[4] }, { name: "Other", value: 5, color: colors[6] }];
   try {
     const a = raw as Array<Record<string, unknown>>;
-    if (!a || a.length === 0) return fallback;
+    if (!a?.length) return fb;
     const latest = a[a.length - 1] || a[0];
     const segs: Array<{ name: string; value: number }> = [];
     let total = 0;
-    for (const [key, val] of Object.entries(latest)) {
-      if (typeof val === "number" && val > 0) { total += val; segs.push({ name: key, value: val }); }
-      else if (typeof val === "object" && val !== null) {
-        const v = Object.values(val as Record<string, number>)[0];
-        if (typeof v === "number" && v > 0) { total += v; segs.push({ name: key, value: v }); }
-      }
+    for (const [k, v] of Object.entries(latest)) {
+      if (typeof v === "number" && v > 0) { total += v; segs.push({ name: k, value: v }); }
+      else if (typeof v === "object" && v) { const n = Object.values(v as Record<string, number>)[0]; if (typeof n === "number" && n > 0) { total += n; segs.push({ name: k, value: n }); } }
     }
-    if (segs.length === 0 || total <= 0) return fallback;
+    if (!segs.length || total <= 0) return fb;
     segs.sort((a, b) => b.value - a.value);
-    return segs.slice(0, 6).map((s, i) => ({
-      name: s.name.length > 20 ? s.name.substring(0, 17) + "..." : s.name,
-      value: Math.round((s.value / total) * 100),
-      color: colors[i % colors.length],
-    }));
-  } catch { return fallback; }
+    return segs.slice(0, 6).map((s, i) => ({ name: s.name.length > 20 ? s.name.substring(0, 17) + "..." : s.name, value: Math.round((s.value / total) * 100), color: colors[i % colors.length] }));
+  } catch { return fb; }
 }
 
-// ============================================================
-// FALLBACK BUILDERS (used when Claude API is unavailable)
-// ============================================================
-
-function buildFallbackDescription(name: string, sector: string, industry: string): string {
-  return `${name} is a publicly traded company operating in the ${industry} industry within the ${sector} sector. The company serves its customers through a diversified portfolio of products and services.`;
+function buildFallbackDescription(n: string, s: string, i: string) { return `${n} is a publicly traded company in the ${i} industry within the ${s} sector, serving customers through a diversified product and services portfolio.`; }
+function buildFallbackThesis(n: string, rg?: number, pm?: number, s?: string, i?: string) {
+  const p: Array<{ title: string; description: string }> = [];
+  if (rg && rg > 0.05) p.push({ title: "Strong Revenue Growth", description: `${n} growing at ${(rg * 100).toFixed(1)}%, driven by demand in ${i}.` });
+  else p.push({ title: "Market Position", description: `${n} holds a key position in ${i} within ${s}.` });
+  if (pm && pm > 0.15) p.push({ title: "Superior Profitability", description: `Net margins of ${(pm * 100).toFixed(1)}% reflect pricing power.` });
+  return p;
 }
-
-function buildFallbackThesis(name: string, revGrowth?: number, margin?: number, sector?: string, industry?: string) {
-  const pts: Array<{ title: string; description: string }> = [];
-  if (revGrowth && revGrowth > 0.05) {
-    pts.push({ title: "Strong Revenue Growth", description: `${name} is growing revenue at ${(revGrowth * 100).toFixed(1)}%, driven by strong demand in the ${industry} market.` });
-  } else if (revGrowth && revGrowth > 0) {
-    pts.push({ title: "Stable Revenue Base", description: `${name} shows steady ${(revGrowth * 100).toFixed(1)}% revenue growth with upside potential from secular trends in ${industry}.` });
-  } else {
-    pts.push({ title: "Market Position", description: `${name} holds a significant position in the ${industry} industry within the ${sector} sector.` });
-  }
-  if (margin && margin > 0.15) {
-    pts.push({ title: "Superior Profitability", description: `Net margins of ${(margin * 100).toFixed(1)}% reflect strong pricing power and operational efficiency.` });
-  }
-  return pts;
-}
-
-function buildFallbackRisks(name: string, beta?: number, dte?: number, sector?: string, industry?: string) {
-  const pts: Array<{ title: string; description: string }> = [];
-  if (dte && dte > 1) pts.push({ title: "Leverage Risk", description: `Debt-to-equity of ${dte.toFixed(2)} requires careful balance sheet management.` });
-  if (beta && beta > 1.2) pts.push({ title: "Volatility Risk", description: `Beta of ${beta.toFixed(2)} indicates above-average market sensitivity.` });
-  pts.push({ title: "Industry Headwinds", description: `The ${industry} sector faces regulatory and competitive pressures that could impact ${name}'s growth.` });
-  pts.push({ title: "Macro Sensitivity", description: `${name} is exposed to interest rate changes and economic cycles affecting the broader ${sector} sector.` });
-  return pts;
+function buildFallbackRisks(n: string, b?: number, d?: number, s?: string, i?: string) {
+  const p: Array<{ title: string; description: string }> = [];
+  if (d && d > 1) p.push({ title: "Leverage Risk", description: `D/E of ${d.toFixed(2)} limits flexibility.` });
+  if (b && b > 1.2) p.push({ title: "Volatility", description: `Beta of ${b.toFixed(2)} means amplified drawdowns.` });
+  p.push({ title: "Industry Risk", description: `${i} faces regulatory and competitive pressures affecting ${n}.` });
+  p.push({ title: "Macro Risk", description: `Rate changes and cycles impact the ${s} sector.` });
+  return p;
 }
