@@ -125,61 +125,69 @@ export default function SegmentCharts({ segmentData = [], geoData = [], revenueH
         </div>
       </div>
 
-      {/* Bottom row: Segment pie + Geography pie */}
-      <div className="flex items-start justify-center gap-4 px-4">
-        {/* Segment pie */}
-        <div className="flex-1 flex flex-col items-center">
-          <div className="text-[8px] font-bold text-gray-600 text-center mb-0 uppercase tracking-wider">Business Segments</div>
-          <ResponsiveContainer width="100%" height={140}>
-            <PieChart>
-              <Pie data={segmentData} cx="50%" cy="50%" outerRadius={45} innerRadius={20}
-                dataKey="value" label={renderCustomLabel} labelLine={false}>
-                {segmentData.map((entry, i) => (
-                  <Cell key={i} fill={entry.color} />
-                ))}
-              </Pie>
-              <Tooltip contentStyle={{
-                backgroundColor: "#0a1929", border: "1px solid #334e68",
-                borderRadius: "4px", fontSize: "10px", color: "#fff",
-              }} />
-            </PieChart>
-          </ResponsiveContainer>
-        </div>
+      {/* Bottom row: Segment pie + Geography pie (only if real data available) */}
+      {(segmentData.length > 0 || geoData.length > 0) ? (
+        <div className="flex items-start justify-center gap-4 px-4">
+          {/* Segment pie */}
+          <div className="flex-1 flex flex-col items-center">
+            <div className="text-[8px] font-bold text-gray-600 text-center mb-0 uppercase tracking-wider">Business Segments</div>
+            {segmentData.length > 0 ? (
+              <ResponsiveContainer width="100%" height={140}>
+                <PieChart>
+                  <Pie data={segmentData} cx="50%" cy="50%" outerRadius={45} innerRadius={20}
+                    dataKey="value" label={renderCustomLabel} labelLine={false}>
+                    {segmentData.map((entry, i) => (
+                      <Cell key={i} fill={entry.color} />
+                    ))}
+                  </Pie>
+                  <Tooltip contentStyle={{
+                    backgroundColor: "#0a1929", border: "1px solid #334e68",
+                    borderRadius: "4px", fontSize: "10px", color: "#fff",
+                  }} />
+                </PieChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="text-gray-400 text-[9px] text-center py-8">Not available</div>
+            )}
+          </div>
 
-        {/* Geography pie */}
-        <div className="flex-1 flex flex-col items-center">
-          <div className="text-[8px] font-bold text-gray-600 text-center mb-0 uppercase tracking-wider">Geographic Revenue</div>
-          <ResponsiveContainer width="100%" height={140}>
-            <PieChart>
-              <Pie data={geoData} cx="50%" cy="50%" outerRadius={45} innerRadius={20}
-                dataKey="value" label={renderCustomLabel} labelLine={false}>
-                {geoData.map((entry, i) => (
-                  <Cell key={i} fill={entry.color} />
-                ))}
-              </Pie>
-              <Tooltip contentStyle={{
-                backgroundColor: "#0a1929", border: "1px solid #334e68",
-                borderRadius: "4px", fontSize: "10px", color: "#fff",
-              }} />
-            </PieChart>
-          </ResponsiveContainer>
-        </div>
+          {/* Geography pie */}
+          <div className="flex-1 flex flex-col items-center">
+            <div className="text-[8px] font-bold text-gray-600 text-center mb-0 uppercase tracking-wider">Geographic Revenue</div>
+            {geoData.length > 0 ? (
+              <ResponsiveContainer width="100%" height={140}>
+                <PieChart>
+                  <Pie data={geoData} cx="50%" cy="50%" outerRadius={45} innerRadius={20}
+                    dataKey="value" label={renderCustomLabel} labelLine={false}>
+                    {geoData.map((entry, i) => (
+                      <Cell key={i} fill={entry.color} />
+                    ))}
+                  </Pie>
+                  <Tooltip contentStyle={{
+                    backgroundColor: "#0a1929", border: "1px solid #334e68",
+                    borderRadius: "4px", fontSize: "10px", color: "#fff",
+                  }} />
+                </PieChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="text-gray-400 text-[9px] text-center py-8">Not available</div>
+            )}
+          </div>
 
-        {/* Legend */}
-        <div className="text-[7px] space-y-1 pt-6 pr-1" style={{ minWidth: 70 }}>
-          <div className="font-bold text-gray-500 mb-1">Geography</div>
-          {geoData.map((item, i) => (
-            <div key={i} className="flex items-center gap-1">
-              <div className="w-2 h-2 rounded-sm flex-shrink-0" style={{ backgroundColor: item.color }} />
-              <span className="text-gray-600 truncate">{item.name}</span>
+          {/* Legend */}
+          {geoData.length > 0 && (
+            <div className="text-[7px] space-y-1 pt-6 pr-1" style={{ minWidth: 70 }}>
+              <div className="font-bold text-gray-500 mb-1">Geography</div>
+              {geoData.map((item, i) => (
+                <div key={i} className="flex items-center gap-1">
+                  <div className="w-2 h-2 rounded-sm flex-shrink-0" style={{ backgroundColor: item.color }} />
+                  <span className="text-gray-600 truncate">{item.name}</span>
+                </div>
+              ))}
             </div>
-          ))}
+          )}
         </div>
-      </div>
-
-      <p className="text-[7px] text-gray-400 italic px-4 mt-1">
-        * Segments with negative values are excluded from percentage calculations
-      </p>
+      ) : null}
     </div>
   );
 }
