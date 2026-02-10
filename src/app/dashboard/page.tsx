@@ -5,6 +5,124 @@ import TearSheet from "@/components/TearSheet";
 import { StockData } from "@/lib/types";
 import { useRouter } from "next/navigation";
 
+/** Shimmer skeleton that mirrors the tear sheet layout */
+function TearSheetSkeleton() {
+  return (
+    <div className="max-w-[1400px] mx-auto px-4 py-6 animate-pulse">
+      <div className="bg-white rounded-lg shadow-2xl overflow-hidden">
+        {/* Header */}
+        <div className="bg-[#c8c8c8] py-2 px-6">
+          <div className="h-5 bg-gray-400/40 rounded w-80 mx-auto" />
+        </div>
+        <div className="flex justify-between px-6 py-2 border-b border-gray-200">
+          <div className="h-3 bg-gray-200 rounded w-40" />
+          <div className="h-3 bg-gray-200 rounded w-32" />
+          <div className="h-3 bg-gray-200 rounded w-36" />
+        </div>
+
+        <div className="flex gap-0">
+          {/* Left column skeleton */}
+          <div className="w-[320px] flex-shrink-0 border-r border-gray-200 p-4 space-y-3">
+            {/* Info table */}
+            <div className="space-y-1">
+              {Array.from({ length: 11 }).map((_, i) => (
+                <div key={i} className="flex gap-1">
+                  <div className="h-6 bg-gray-100 rounded flex-1" />
+                  <div className="h-6 bg-gray-50 rounded flex-1" />
+                </div>
+              ))}
+            </div>
+            {/* Price chart placeholder */}
+            <div className="border border-gray-200 rounded p-2">
+              <div className="h-3 bg-gray-200 rounded w-28 mb-2" />
+              <div className="h-32 bg-gradient-to-b from-gray-100 to-gray-50 rounded" />
+            </div>
+            {/* Valuation table placeholder */}
+            <div className="border border-gray-200 rounded p-2">
+              <div className="h-3 bg-gray-200 rounded w-36 mb-2" />
+              <div className="space-y-1">
+                {Array.from({ length: 3 }).map((_, i) => (
+                  <div key={i} className="flex gap-1">
+                    <div className="h-6 bg-gray-100 rounded flex-1" />
+                    <div className="h-6 bg-gray-50 rounded w-16" />
+                  </div>
+                ))}
+              </div>
+            </div>
+            {/* Growth table placeholder */}
+            <div className="border border-gray-200 rounded p-2">
+              <div className="h-3 bg-gray-200 rounded w-36 mb-2" />
+              <div className="space-y-1">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <div key={i} className="flex gap-1">
+                    <div className="h-5 bg-gray-100 rounded flex-1" />
+                    <div className="h-5 bg-gray-50 rounded w-16" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Right column skeleton */}
+          <div className="flex-1 p-4 space-y-3">
+            {/* Description */}
+            <div className="border border-gray-200 rounded p-3">
+              <div className="h-4 bg-gray-200 rounded w-48 mb-2" />
+              <div className="space-y-1.5">
+                <div className="h-3 bg-gray-100 rounded w-full" />
+                <div className="h-3 bg-gray-100 rounded w-5/6" />
+                <div className="h-3 bg-gray-100 rounded w-4/6" />
+              </div>
+            </div>
+            {/* Thesis */}
+            <div className="border border-gray-200 rounded p-3">
+              <div className="h-4 bg-gray-200 rounded w-20 mb-2" />
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className="mb-1.5">
+                  <div className="h-3 bg-gray-100 rounded w-full" />
+                  <div className="h-3 bg-gray-100 rounded w-3/4 mt-1" />
+                </div>
+              ))}
+            </div>
+            {/* Risks */}
+            <div className="border border-gray-200 rounded p-3">
+              <div className="h-4 bg-gray-200 rounded w-52 mb-2" />
+              {Array.from({ length: 2 }).map((_, i) => (
+                <div key={i} className="mb-1.5">
+                  <div className="h-3 bg-gray-100 rounded w-full" />
+                  <div className="h-3 bg-gray-100 rounded w-2/3 mt-1" />
+                </div>
+              ))}
+            </div>
+            {/* Charts */}
+            <div className="border border-gray-200 rounded p-2">
+              <div className="h-5 bg-navy-900/20 rounded w-72 mx-auto mb-3" />
+              <div className="flex gap-2 px-2">
+                <div className="flex-1">
+                  <div className="h-3 bg-gray-200 rounded w-16 mx-auto mb-1" />
+                  <div className="h-36 bg-gradient-to-t from-gray-100 to-gray-50 rounded flex items-end justify-around px-2 pb-2">
+                    {[60, 70, 65, 80, 75, 85, 90, 95].map((h, i) => (
+                      <div key={i} className="bg-gray-200 rounded-t" style={{ width: '8%', height: `${h}%` }} />
+                    ))}
+                  </div>
+                </div>
+                <div className="flex-1">
+                  <div className="h-3 bg-gray-200 rounded w-16 mx-auto mb-1" />
+                  <div className="h-36 bg-gradient-to-t from-gray-100 to-gray-50 rounded flex items-end justify-around px-2 pb-2">
+                    {[50, 60, 55, 70, 65, 75, 80, 85].map((h, i) => (
+                      <div key={i} className="bg-gray-200 rounded-t" style={{ width: '8%', height: `${h}%` }} />
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function LoadingScreen({ ticker, loadingStep }: { ticker: string; loadingStep: string }) {
   const [logs, setLogs] = useState<string[]>([]);
   const [progress, setProgress] = useState(0);
@@ -290,8 +408,13 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Loading state - advanced terminal look */}
-      {loading && <LoadingScreen ticker={ticker} loadingStep={loadingStep} />}
+      {/* Loading state - terminal log + skeleton preview */}
+      {loading && (
+        <>
+          <LoadingScreen ticker={ticker} loadingStep={loadingStep} />
+          <TearSheetSkeleton />
+        </>
+      )}
 
       {/* Tear sheet display */}
       {stockData && !loading && <TearSheet data={stockData} />}

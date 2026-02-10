@@ -42,16 +42,29 @@ function renderCustomLabel({
 }
 
 export default function SegmentCharts({ segmentData = [], geoData = [], revenueHistory = [], ebitdaHistory = [] }: Props) {
-  const formatRevenue = (val: number) => {
-    if (Math.abs(val) >= 1e9) return `$${(val / 1e9).toFixed(1)}B`;
-    if (Math.abs(val) >= 1e6) return `$${(val / 1e6).toFixed(0)}M`;
-    return `$${val.toLocaleString()}`;
+  // Auto-detect magnitude for consistent axis scaling
+  // If max value is in billions, ALL values display as "XB"
+  // If max value is in millions, ALL values display as "XM"
+  const detectScale = (data: Array<{ [key: string]: unknown }>, key: string): "B" | "M" | "K" => {
+    const max = Math.max(...data.map(d => Math.abs(Number(d[key]) || 0)));
+    if (max >= 1e9) return "B";
+    if (max >= 1e6) return "M";
+    return "K";
   };
 
-  const formatAxis = (val: number) => {
-    if (Math.abs(val) >= 1e9) return `${(val / 1e9).toFixed(0)}B`;
-    if (Math.abs(val) >= 1e6) return `${(val / 1e6).toFixed(0)}M`;
-    return val.toLocaleString();
+  const revScale = revenueHistory.length > 0 ? detectScale(revenueHistory, "revenue") : "B";
+  const ebitdaScale = ebitdaHistory.length > 0 ? detectScale(ebitdaHistory, "ebitda") : "B";
+
+  const formatByScale = (val: number, scale: "B" | "M" | "K", prefix = "$") => {
+    if (scale === "B") return `${prefix}${(val / 1e9).toFixed(1)}B`;
+    if (scale === "M") return `${prefix}${(val / 1e6).toFixed(0)}M`;
+    return `${prefix}${(val / 1e3).toFixed(0)}K`;
+  };
+
+  const formatAxisByScale = (val: number, scale: "B" | "M" | "K") => {
+    if (scale === "B") return `${(val / 1e9).toFixed(1)}B`;
+    if (scale === "M") return `${(val / 1e6).toFixed(0)}M`;
+    return `${(val / 1e3).toFixed(0)}K`;
   };
 
   return (
@@ -75,11 +88,11 @@ export default function SegmentCharts({ segmentData = [], geoData = [], revenueH
                   axisLine={{ stroke: "#bcccdc" }} tickLine={false} />
                 <YAxis
                   tick={{ fontSize: 7, fill: "#627d98", fontFamily: "JetBrains Mono, monospace" }}
-                  axisLine={false} tickLine={false} width={42} tickFormatter={formatAxis} />
+                  axisLine={false} tickLine={false} width={42} tickFormatter={(v: number) => formatAxisByScale(v, revScale)} />
                 <Tooltip contentStyle={{
                   backgroundColor: "#0a1929", border: "1px solid #334e68",
                   borderRadius: "4px", fontSize: "10px", fontFamily: "JetBrains Mono, monospace", color: "#fff",
-                }} formatter={(value: number) => [formatRevenue(value), "Revenue"]} />
+                }} formatter={(value: number) => [formatByScale(value, revScale), "Revenue"]} />
                 <Bar dataKey="revenue" radius={[2, 2, 0, 0]}>
                   {revenueHistory.map((_, i) => (
                     <Cell key={i} fill={i === revenueHistory.length - 1 ? "#0a1929" : "#627d98"} />
@@ -104,11 +117,11 @@ export default function SegmentCharts({ segmentData = [], geoData = [], revenueH
                   axisLine={{ stroke: "#bcccdc" }} tickLine={false} />
                 <YAxis
                   tick={{ fontSize: 7, fill: "#627d98", fontFamily: "JetBrains Mono, monospace" }}
-                  axisLine={false} tickLine={false} width={42} tickFormatter={formatAxis} />
+                  axisLine={false} tickLine={false} width={42} tickFormatter={(v: number) => formatAxisByScale(v, ebitdaScale)} />
                 <Tooltip contentStyle={{
                   backgroundColor: "#0a1929", border: "1px solid #334e68",
                   borderRadius: "4px", fontSize: "10px", fontFamily: "JetBrains Mono, monospace", color: "#fff",
-                }} formatter={(value: number) => [formatRevenue(value), "EBITDA"]} />
+                }} formatter={(value: number) => [formatByScale(value, ebitdaScale), "EBITDA"]} />
                 <Bar dataKey="ebitda" radius={[2, 2, 0, 0]}>
                   {ebitdaHistory.map((entry, i) => (
                     <Cell key={i} fill={entry.ebitda >= 0

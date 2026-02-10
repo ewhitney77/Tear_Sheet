@@ -52,6 +52,40 @@ const SEGMENT_COLORS = [
 // ============================================================
 
 // ============================================================
+// RESPONSE CACHE - preserves FMP quota (250 calls/day)
+// In-memory cache keyed by ticker+date. Survives across requests
+// within same Vercel serverless function instance (~15 min).
+// Same ticker on same day = instant response, zero API calls.
+// ============================================================
+const responseCache = new Map<string, { data: unknown; timestamp: number }>();
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+function getCacheKey(ticker: string): string {
+  const today = new Date().toISOString().split("T")[0];
+  return `${ticker}_${today}`;
+}
+
+function getCached(ticker: string): unknown | null {
+  const key = getCacheKey(ticker);
+  const entry = responseCache.get(key);
+  if (entry && (Date.now() - entry.timestamp) < CACHE_TTL_MS) {
+    return entry.data;
+  }
+  responseCache.delete(key);
+  return null;
+}
+
+function setCache(ticker: string, data: unknown): void {
+  const key = getCacheKey(ticker);
+  responseCache.set(key, { data, timestamp: Date.now() });
+  // Evict old entries (keep max 50 tickers)
+  if (responseCache.size > 50) {
+    const oldest = responseCache.keys().next().value;
+    if (oldest) responseCache.delete(oldest);
+  }
+}
+
+// ============================================================
 // DATA FETCHING LAYER
 // ============================================================
 
@@ -299,6 +333,12 @@ export async function GET(request: NextRequest) {
   const ticker = request.nextUrl.searchParams.get("ticker")?.toUpperCase()?.trim();
   if (!ticker || !/^[A-Z]{1,10}$/.test(ticker)) {
     return NextResponse.json({ error: "Valid ticker required (1-10 letters)" }, { status: 400 });
+  }
+
+  // Check cache first - same ticker on same day = instant response
+  const cached = getCached(ticker);
+  if (cached) {
+    return NextResponse.json(cached);
   }
 
   const log: string[] = [];
@@ -718,6 +758,9 @@ export async function GET(request: NextRequest) {
     if (response.revenueHistory.length === 0) log.push("⚠ No revenue history");
     if (response.ebitdaHistory.length === 0) log.push("⚠ No EBITDA history");
     if (response.priceHistory.length === 0) log.push("⚠ No price history");
+
+    // Cache successful response for this ticker today
+    setCache(ticker, response);
 
     return NextResponse.json(response);
   } catch (error) {
